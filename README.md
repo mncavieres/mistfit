@@ -5,6 +5,10 @@ Nested-sampling stellar-parameter fits using **dynesty** + **minimint** (MIST is
 This package provides a single public function, `fit_stars_with_minimint`, which takes an `astropy.table.Table` containing photometry (and optionally spectroscopy, parallax, and reddening priors), and returns the same table with posterior summaries appended. A simple CLI is also included.
 
 ---
+## Citation
+
+If this tool is used in a publication, please cite **dynesty**, **MIST/minimint**, and Cavieres (in prep), and your data sources (e.g., Gaia, DECam).
+
 
 ## Quick start
 
@@ -246,6 +250,3 @@ pip install minimint
 
 Do whatever you want, fully open source
 
-## Citation
-
-If this tool is used in a publication, please cite **dynesty**, **MIST/minimint**, and Cavieres (in prep), and your data sources (e.g., Gaia, DECam).
