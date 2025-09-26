@@ -40,10 +40,10 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 
 # Physical / prior bounds
-M_MIN, M_MAX = 0.1, 15.0                 # Msun
+M_MIN, M_MAX = 0.1, 100.0                 # Msun
 LOGAGE_MIN, LOGAGE_MAX = 5.0, 10.113943352306837  # yr, no need to go beyond the hubble time
 FEH_MIN, FEH_MAX = -2.9, 0.9 # limits of MIST
-DIST_MIN, DIST_MAX = 1.0e3, 2.0e5         # pc
+DIST_MIN, DIST_MAX = 10.0, 2.0e5         # pc
 EBV_MIN_DEFAULT, EBV_MAX_DEFAULT = 0.0, 1.5 # you might need to extend this for very reddened stars
 ALPHA_IMF = 2.35 # Salpeter slope
 
