@@ -7,7 +7,7 @@ This package provides a single public function, `fit_stars_with_minimint`, which
 ---
 ## Citation
 
-If this tool is used in a publication, please cite **dynesty**, **MIST/minimint**, and Cavieres (in prep), and your data sources (e.g., Gaia, DECam).
+If this tool is used in a publication, please cite **dynesty**, **minimint**, and Cavieres (in prep).
 
 
 ## Quick start
