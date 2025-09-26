@@ -1,4 +1,4 @@
-# minimint\_fit
+# Nested Sampling MIST fitter
 
 Nested-sampling stellar-parameter fits using **dynesty** + **minimint** (MIST isochrones with extinction).
 
