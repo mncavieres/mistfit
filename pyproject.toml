@@ -13,7 +13,7 @@ dynamic = ["version"]          # provided by setuptools_scm
 description = "Fit MIST models using MiniMINT with dynesty nested sampling (photometry + spectroscopic constraints)."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "LICENSE" }
+license = MIT
 authors = [{ name = "Manuel Cavieres" }]
 keywords = ["MIST", "stellar", "astrophysics", "dynesty", "minimint", "isochrones"]
 classifiers = [
