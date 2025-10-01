@@ -33,8 +33,8 @@ dev = ["pytest", "pytest-cov", "ruff", "mypy", "build", "twine"]
 plot = ["corner>=2.2"]
 
 [project.urls]
-Homepage = "https://github.com/mncavieres/MIST-stellar-fitter"
-Issues   = "https://github.com/mncavieres/MIST-stellar-fitter/issues"
+Homepage = "https://github.com/mncavieres/mistfit"
+Issues   = "https://github.com/mncavieres/mistfit/issues"
 
 [project.scripts]
 mistfit = "mistfit.cli:main"
