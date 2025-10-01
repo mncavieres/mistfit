@@ -180,7 +180,7 @@ def _build_observed_from_row(row, bands):
     return obs
 
 def _choose_mode(obs):
-    print(obs)
+    #print(obs)
     return 'spec' if ('Teff' in obs and 'logg' in obs) else 'phot'
 
 def _summarize_samples(samples):
@@ -240,8 +240,9 @@ def ptform_u5(u, obs, ebv_range,
         logd = np.log10(DIST_MIN_) + u[3] * (np.log10(DIST_MAX_) - np.log10(DIST_MIN_))
         d = 10**logd
     # E(B-V)
-    EBV_MAX = obs['ebv'] * 5 if ('ebv' in obs and obs['ebv'][1] > 0) else EBV_MAX_DEFAULT
+    
     EBV_MIN, EBV_MAX = ebv_range
+    EBV_MAX = obs['ebv'] * 5 if ('ebv' in obs and obs['ebv'][1] > 0) else EBV_MAX_DEFAULT
     ebv = EBV_MIN + u[4] * (EBV_MAX - EBV_MIN)
     return np.array([m, la, feh, d, ebv], dtype=float)
 
@@ -511,23 +512,23 @@ def fit_stars_with_minimint(
     return table
 
 
-if __name__ == "__main__":
-    import argparse
-    ap = argparse.ArgumentParser(description="Run minimint nested fits on an input catalog.")
-    ap.add_argument("input_table", help="Path to input FITS/ECSV/etc.")
-    ap.add_argument("--outdir", required=True, help="Output directory")
-    ap.add_argument("--nlive", type=int, default=3000)
-    ap.add_argument("--dlogz", type=float, default=0.01)
-    ap.add_argument("--procs", type=int, default=4)
-    ap.add_argument("--debug", action="store_true")
-    args = ap.parse_args()
+# if __name__ == "__main__":
+#     import argparse
+#     ap = argparse.ArgumentParser(description="Run minimint nested fits on an input catalog.")
+#     ap.add_argument("input_table", help="Path to input FITS/ECSV/etc.")
+#     ap.add_argument("--outdir", required=True, help="Output directory")
+#     ap.add_argument("--nlive", type=int, default=3000)
+#     ap.add_argument("--dlogz", type=float, default=0.01)
+#     ap.add_argument("--procs", type=int, default=4)
+#     ap.add_argument("--debug", action="store_true")
+#     args = ap.parse_args()
 
-    tab = Table.read(args.input_table)
-    _ = fit_stars_with_minimint(
-        tab, output_path=args.outdir,
-        nlive=args.nlive, dlogz=args.dlogz,
-        processes=args.procs, debug=args.debug
-    )
+#     tab = Table.read(args.input_table)
+#     _ = fit_stars_with_minimint(
+#         tab, output_path=args.outdir,
+#         nlive=args.nlive, dlogz=args.dlogz,
+#         processes=args.procs, debug=args.debug
+#     )
 
 # if __name__ == "__main__":
 #     from astropy.table import Table
