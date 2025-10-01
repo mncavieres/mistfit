@@ -8,12 +8,10 @@ dynamic = ["version"]
 description = "Fit MIST models using MiniMINT with dynesty nested sampling (photometry + spectroscopic constraints)."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT License" }
 authors = [{ name = "Manuel Cavieres" }]
 keywords = ["MIST", "stellar", "astrophysics", "dynesty", "minimint", "isochrones"]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Intended Audience :: Science/Research",
   "Topic :: Scientific/Engineering :: Astronomy"
@@ -49,3 +47,6 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.setuptools]
+license-files = []
