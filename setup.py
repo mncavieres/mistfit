@@ -14,6 +14,7 @@ setup(
     long_description_content_type="text/markdown",
     author="Manuel Cavieres",
     license="MIT",
+    license_files = ["LICENSE"],
     url="https://github.com/mncavieres/MIST-stellar-fitter",
     project_urls={
         "Issues": "https://github.com/mncavieres/MIST-stellar-fitter/issues",
