@@ -2,9 +2,10 @@ name: CI / Build / Publish
 
 on:
   push:
-    tags:
-      - "v*"         # tag releases like v0.2.0 or v0.3.0rc1
-  workflow_dispatch: {}  # allow manual runs
+    branches: [ main ]
+    tags: [ "v*" ]          # tag releases like v0.2.0 or v0.2.0rc1
+  pull_request:
+  workflow_dispatch: {}
 
 jobs:
   test:
@@ -23,6 +24,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/setup.cfg', 'setup.py', 'requirements*.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
@@ -31,8 +39,7 @@ jobs:
           python -m pip install -e .[dev]
 
       - name: Run tests
-        run: |
-          pytest -q
+        run: python -m pytest -q
 
   build:
     name: Build sdist + wheel
@@ -47,9 +54,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/setup.cfg', 'setup.py', 'requirements*.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
       - name: Upgrade build tools
-        run: |
-          python -m pip install --upgrade pip build
+        run: python -m pip install --upgrade pip build wheel
 
       - name: Build
         run: python -m build
