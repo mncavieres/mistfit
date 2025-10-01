@@ -13,7 +13,6 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Manuel Cavieres",
-    license_files = ["LICENSE"],
     url="https://github.com/mncavieres/mistfit",
     project_urls={
         "Issues": "https://github.com/mncavieres/mistfit/issues",
