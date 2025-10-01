@@ -58,7 +58,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/setup.cfg', 'setup.py', 'requirements*.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
           restore-keys: ${{ runner.os }}-pip-
 
       - name: Upgrade build tools
@@ -73,11 +73,38 @@ jobs:
       - name: Verify metadata
         run: python -m twine check dist/*
 
+      - name: Inspect license headers in METADATA (debug)
+        run: |
+          python - <<'PY'
+          import tarfile, zipfile, glob, io, sys
+          # Check sdist PKG-INFO
+          for tgz in glob.glob("dist/*.tar.gz"):
+              with tarfile.open(tgz, "r:gz") as tf:
+                  for m in tf.getmembers():
+                      if m.name.endswith("PKG-INFO"):
+                          data = tf.extractfile(m).read().decode("utf-8", "replace")
+                          print(f"---- {tgz} :: PKG-INFO (License lines) ----")
+                          for line in data.splitlines():
+                              if "License" in line or "license" in line:
+                                  print(line)
+          # Check wheel METADATA
+          for whl in glob.glob("dist/*.whl"):
+              with zipfile.ZipFile(whl) as zf:
+                  meta = [n for n in zf.namelist() if n.endswith("METADATA")]
+                  for n in meta:
+                      data = zf.read(n).decode("utf-8","replace")
+                      print(f"---- {whl} :: METADATA (License lines) ----")
+                      for line in data.splitlines():
+                          if "License" in line or "license" in line:
+                              print(line)
+          PY
+
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/*
+
 
   publish-testpypi:
     name: Publish to TestPyPI (pre-releases)

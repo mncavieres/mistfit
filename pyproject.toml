@@ -1,19 +1,14 @@
 [build-system]
-requires = [
-  "setuptools>=69",
-  "setuptools-scm>=8",
-  "wheel"
-]
+requires = ["setuptools>=69", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
-# ---- PEP 621 project metadata ----
 [project]
-name = "mistfit"  # PyPI name
-dynamic = ["version"]          # provided by setuptools_scm
+name = "mistfit"
+dynamic = ["version"]
 description = "Fit MIST models using MiniMINT with dynesty nested sampling (photometry + spectroscopic constraints)."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = { text = "MIT License" }
 authors = [{ name = "Manuel Cavieres" }]
 keywords = ["MIST", "stellar", "astrophysics", "dynesty", "minimint", "isochrones"]
 classifiers = [
@@ -23,7 +18,6 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "Topic :: Scientific/Engineering :: Astronomy"
 ]
-
 dependencies = [
   "numpy>=1.23",
   "scipy>=1.10",
@@ -32,45 +26,26 @@ dependencies = [
   "minimint>=0.5",
   "matplotlib>=3.6",
   "tqdm>=4.64"
-  # keep "corner" optional if you only use it when debug=True
 ]
 
 [project.optional-dependencies]
-dev = [
-  "pytest",
-  "pytest-cov",
-  "ruff",
-  "mypy",
-  "build",
-  "twine"
-]
+dev = ["pytest", "pytest-cov", "ruff", "mypy", "build", "twine"]
 plot = ["corner>=2.2"]
 
 [project.urls]
 Homepage = "https://github.com/mncavieres/MIST-stellar-fitter"
-Issues = "https://github.com/mncavieres/MIST-stellar-fitter/issues"
+Issues   = "https://github.com/mncavieres/MIST-stellar-fitter/issues"
 
 [project.scripts]
 mistfit = "mistfit.cli:main"
-# Optional alias for transition:
-mist-fit = "mistfit.cli:main"
+mist-fit = "mistfit.cli:main"  # optional alias
 
-# ---- setuptools_scm for version from git tags ----
 [tool.setuptools_scm]
 version_scheme = "post-release"
-local_scheme = "no-local-version"
+local_scheme   = "no-local-version"
 
-# ---- Tell setuptools to use src/ layout ----
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
-
-# If you need to include non-code files inside the package, uncomment and adjust:
-# [tool.setuptools.package-data]
-# mistfit = ["data/**"]
-
-# If you need to include non-package files in sdist, keep MANIFEST.in as usual:
-# include README.md
-# include LICENSE
