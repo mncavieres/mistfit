@@ -63,15 +63,16 @@ The outputs are written to `--outdir`:
 * If `--debug`, per-star folders with `runplot.png`, `traceplot.png`, `corner.png`, optional `isochrone_check.png`, and `summary.json`.
 
 Helpful commands:
-# show help
+
+```bash
 mistfit --help
+```
 
-# legacy alias (kept for transition)
-mist-fit --help
+module form (works even without the console script on PATH)
 
-# module form (works even without the console script on PATH)
+```bash
 python -m mistfit.cli --help
-
+```
 
 ---
 
