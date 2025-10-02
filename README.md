@@ -12,6 +12,20 @@ If this tool is used in a publication, please cite **dynesty**, **minimint**, an
 
 ## Quick start
 
+---
+
+## Installation & requirements
+
+* Python ≥ 3.9 recommended
+* Dependencies: `numpy`, `scipy`, `matplotlib` (headless OK), `astropy`, `dynesty`, `minimint`, `corner` (optional, for debug corner plots)
+
+Install with pip (example):
+
+```bash
+pip install mistfit
+```
+
+
 ### Python example
 
 ```python
@@ -219,21 +233,6 @@ fit_stars_with_minimint(
 ```
 
 **Returns** the input `Table` with posterior and diagnostic columns appended, and writes an updated table to `output_path`.
-
----
-
-## Installation & requirements
-
-* Python ≥ 3.9 recommended
-* Dependencies: `numpy`, `scipy`, `matplotlib` (headless OK), `astropy`, `dynesty`, `minimint`, `corner` (optional, for debug corner plots)
-
-Install with pip (example):
-
-```bash
-pip install numpy scipy matplotlib astropy dynesty corner
-# minimint is a separate package; install from pip or source as appropriate
-pip install minimint
-```
 
 ---
 
