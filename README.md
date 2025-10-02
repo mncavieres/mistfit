@@ -46,18 +46,32 @@ if __name__ == "__main__":
 ### CLI
 
 ```bash
-python minimint_fit.py /path/to/input_table.fits \
+# run a nested fit on an input catalog (FITS/ECSV supported by Astropy)
+mistfit /path/to/input_table.fits \
   --outdir /path/to/out \
   --nlive 5000 \
   --dlogz 0.01 \
   --procs 8 \
   --debug
+
 ```
 
 The outputs are written to `--outdir`:
+--outdir will be created if it doesn’t exist; results are saved as fit_results.fits (or .ecsv fallback).
 
 * Updated table with appended posterior columns: `fit_results.fits` (or `.ecsv` if FITS types conflict)
 * If `--debug`, per-star folders with `runplot.png`, `traceplot.png`, `corner.png`, optional `isochrone_check.png`, and `summary.json`.
+
+Helpful commands:
+# show help
+mistfit --help
+
+# legacy alias (kept for transition)
+mist-fit --help
+
+# module form (works even without the console script on PATH)
+python -m mistfit.cli --help
+
 
 ---
 
