@@ -242,7 +242,7 @@ def ptform_u5(u, obs, ebv_range,
     # E(B-V)
     
     EBV_MIN, EBV_MAX = ebv_range
-    EBV_MAX = obs['ebv'][0] * 5 if ('ebv' in obs and obs['ebv'][1] > 0) else EBV_MAX_DEFAULT
+    #EBV_MAX = obs['ebv'][0] * 5 if ('ebv' in obs and obs['ebv'][1] > 0) else EBV_MAX_DEFAULT
     ebv = EBV_MIN + u[4] * (EBV_MAX - EBV_MIN)
     return np.array([m, la, feh, d, ebv], dtype=float)
 
