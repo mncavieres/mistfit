@@ -55,7 +55,14 @@ MINIMINT_BANDS = set([
     'Gaia_BP_MAWb','SDSS_z','Tycho_B','Bessell_B','DECam_i','Gaia_G_DR2Rev','DECam_Y','2MASS_J',
     'Kepler_Kp','DECam_u','GALEX_FUV','GALEX_NUV','PS_open','SDSS_u','DECam_r','SkyMapper_g',
     'SkyMapper_z','PS_g','Kepler_D51','DECam_g','Bessell_R','DECam_z','Hipparcos_Hp','WISE_W2',
-    'TESS','2MASS_H','WISE_W3','SkyMapper_i','Gaia_G_MAW','Gaia_BP_MAWf'
+    'TESS','2MASS_H','WISE_W3','SkyMapper_i','Gaia_G_MAW','Gaia_BP_MAWf',
+    # VISTA (VHS / VIKING / VVV). MIST ships a VISTA BC table under exactly
+    # these names. Added because near-IR photometry from these surveys is
+    # routinely passed to fitters under 2MASS column names, which silently
+    # matches it against 2MASS bolometric corrections and de-reddens it with
+    # 2MASS coefficients -- A_Ks/E(B-V) is 0.388 for VISTA against 0.164 for
+    # 2MASS, a factor 2.4. VISTA_Z is deliberately absent: see EXT_COEFF.
+    'VISTA_Y','VISTA_J','VISTA_H','VISTA_Ks',
 ])
 
 # Extinction coefficients A_lambda/E(B-V)
@@ -72,10 +79,156 @@ EXT_COEFF = {
     '2MASS_J':0.987,'2MASS_H':0.531,'2MASS_Ks':0.164,
     # Common Johnson–Cousins/Bessell approximations (Rv=3.1-style)
     'Bessell_U':5.47,'Bessell_B':4.32,'Bessell_V':3.31,'Bessell_R':2.68,'Bessell_I':1.85,
+    # VISTA/VHS, from the VHS catalogue's own AY, AJ, AH, AKS columns divided by
+    # its EBV column. VISTA_Z has no A_Z column in VHS and so gets no entry --
+    # safe only because it is also absent from MINIMINT_BANDS. A band named in
+    # MINIMINT_BANDS but missing here cannot be de-reddened; _bands_for_row now
+    # excludes such bands and warns, rather than dropping them in silence.
+    'VISTA_Y':1.310,'VISTA_J':0.928,'VISTA_H':0.592,'VISTA_Ks':0.388,
 }
 
 # Error column suffixes to search for
 ERR_SUFFIXES = ["_ERR", "_ERRMAG", "_SIG", "_E", "_error"]
+
+# =============================================================================
+# Configuration
+# =============================================================================
+# Every setting below can be set from the environment, which makes it practical
+# to run the same code under a job scheduler with one variable changed and
+# nothing else, or assigned directly before calling fit_stars_with_minimint().
+# They are module-level rather than function arguments because the likelihood
+# and prior-transform callables are handed to dynesty's process pool and must
+# stay picklable.
+
+def _env_float(name, default):
+    v = os.environ.get(name)
+    if v is None or v.strip() == "":
+        return default
+    return None if v.strip().lower() == "none" else float(v)
+
+
+# --- the Gaia parallax -------------------------------------------------------
+#   "published"   DISCARD the parallax whenever the zero-point-corrected value
+#                 is <= 0, and otherwise use it as the distance prior. What the
+#                 code did before; kept only for reproducing old results.
+#
+#                 It is a defect, not a conservative choice. A true parallax is
+#                 positive, but the measurement scatters either side of zero,
+#                 and for a distant star the true value is far below the
+#                 uncertainty: at 60 kpc it is 0.017 mas against a typical Gaia
+#                 uncertainty of 0.04-0.15 mas, so about a third of genuinely
+#                 distant stars measure negative on noise alone, 41% at 100 kpc.
+#                 Discarding those is a discard *conditional on the noise
+#                 realisation*, and a selective one -- only the stars that
+#                 scattered towards "far" lose their distance prior.
+#
+#   "prior"       (default) keep the measurement whatever its sign, as the
+#                 distance prior: ptform_u5 draws
+#                     plx ~ TruncNorm(plx_obs, plx_err, lower=0),  d = 1e3/plx
+#                 clipped to [DIST_MIN, DIST_MAX]. A negative mean makes the
+#                 prior the positive tail of that Gaussian: "far, but not
+#                 infinitely far". Carries an implicit 1/d^2 Jacobian and two
+#                 boundaries (truncation at zero, clip at DIST_MAX).
+#
+#   "likelihood"  keep it whatever its sign, entering the likelihood as what it
+#                 is -- a Gaussian observation of 1/d -- with the distance prior
+#                 given by DISTANCE_PRIOR:
+#                     ll += -0.5 * ((1e3/d - plx_obs) / plx_err)**2
+#                 Formally cleanest: no truncation, no clip, no Jacobian. In
+#                 practice it samples less reliably on multimodal posteriors,
+#                 because it turns a hard geometric constraint into a soft
+#                 penalty a competing mode can outbid. See CHANGELOG.md.
+#
+# lnZ is comparable between "published" and "prior" (same likelihood, different
+# prior) but NOT against "likelihood", which adds a term and is therefore the
+# evidence for a different model.
+PARALLAX_MODE = os.environ.get("PARALLAX_MODE", "prior").strip().lower()
+if PARALLAX_MODE not in ("published", "prior", "likelihood"):
+    raise ValueError(
+        f"PARALLAX_MODE must be published|prior|likelihood, got {PARALLAX_MODE!r}")
+
+# --- the distance prior ------------------------------------------------------
+# Used whenever the parallax is not itself the distance prior: always under
+# PARALLAX_MODE="likelihood", for discarded stars under "published", and for any
+# star with no usable parallax.
+#
+#   "loguniform"  (default) p(d) ~ 1/d, uniform in log d. The historical choice.
+#   "flat"        p(d) ~ const.
+#   "volume"      p(d) ~ d^2, the volume element: constant space density.
+#
+# Not cosmetic. Over the default [10 pc, 200 kpc] the fraction of prior mass
+# below 10 kpc is 70% for loguniform (median 1.4 kpc), 5% for flat and 0.0% for
+# volume, so the choice decides how many live points start in a region that, for
+# a sample of distant stars, contains nothing. Weight given to a 2 kpc solution
+# relative to a 50 kpc one: 25 (loguniform), 1 (flat), 0.0016 (volume).
+#
+# The obvious "physical" answer is a trap worth naming. For a tracer with
+# rho ~ r^-3.5 the number per unit distance goes as d^2 rho(d) ~ d^-1.5, which
+# favours near stars even more strongly than loguniform. That is right for a
+# volume-complete sample and wrong for a magnitude-limited sample of distant
+# stars, where the selection function -- not the density profile -- is what
+# makes the sample distant. None of these three encodes a selection function;
+# "volume" is the standard uninformative choice in three dimensions, not a
+# claim about the Galaxy.
+DISTANCE_PRIOR = os.environ.get("DISTANCE_PRIOR", "loguniform").strip().lower()
+if DISTANCE_PRIOR not in ("loguniform", "flat", "volume"):
+    raise ValueError(
+        f"DISTANCE_PRIOR must be loguniform|flat|volume, got {DISTANCE_PRIOR!r}")
+
+
+def _draw_distance(u, dmin, dmax):
+    """Inverse-CDF draw of a distance from DISTANCE_PRIOR. Units follow dmin."""
+    if DISTANCE_PRIOR == "flat":
+        return dmin + u * (dmax - dmin)
+    if DISTANCE_PRIOR == "volume":
+        return (dmin**3 + u * (dmax**3 - dmin**3)) ** (1.0 / 3.0)
+    log_dmin, log_dmax = np.log10(dmin), np.log10(dmax)
+    return 10 ** (log_dmin + u * (log_dmax - log_dmin))
+
+
+# --- the error budget --------------------------------------------------------
+# Each observable's quoted uncertainty is inflated before use, standing in for
+# systematics the formal errors do not carry. Two independent knobs:
+#
+#   *_ADDITIVE   added to the quoted error. The historical behaviour, and these
+#                defaults reproduce it exactly: Teff +100 K, logg +0.1 dex,
+#                [Fe/H] +0.1 dex, photometry +0.1 mag.
+#   *_FLOOR      a minimum, max(err, floor). None disables it.
+#
+# A floor is the right tool when quoted errors are implausibly small rather than
+# merely optimistic: a pipeline reporting logg to 0.0004 dex will otherwise pin
+# the fit wherever it happened to land, and no additive term large enough to fix
+# that leaves the well-measured stars alone. Both apply when both are set:
+# max(err + additive, floor).
+TEFF_ERR_ADDITIVE = _env_float("TEFF_ERR_ADDITIVE", 100.0)   # K
+LOGG_ERR_ADDITIVE = _env_float("LOGG_ERR_ADDITIVE", 0.1)     # dex
+FEH_ERR_ADDITIVE = _env_float("FEH_ERR_ADDITIVE", 0.1)       # dex
+PHOT_ERR_ADDITIVE = _env_float("PHOT_ERR_ADDITIVE", 0.1)     # mag
+TEFF_ERR_FLOOR = _env_float("TEFF_ERR_FLOOR", None)
+LOGG_ERR_FLOOR = _env_float("LOGG_ERR_FLOOR", None)
+FEH_ERR_FLOOR = _env_float("FEH_ERR_FLOOR", None)
+PHOT_ERR_FLOOR = _env_float("PHOT_ERR_FLOOR", None)
+
+
+def _inflate(err, additive, floor):
+    """Quoted uncertainty -> the one the likelihood uses."""
+    out = float(err) + (additive or 0.0)
+    return out if floor is None else max(out, float(floor))
+
+
+# --- seeding -----------------------------------------------------------------
+# True (default) seeds one Generator per star from (random_seed, source_id), so
+# each star's fit is independent of every other star and of the order the table
+# happens to be in. False restores the previous behaviour of one shared
+# Generator advanced across the table, for reproducing old results.
+RNG_PER_STAR = os.environ.get("RNG_PER_STAR", "1") not in ("0", "false", "False")
+
+# The Gaia EDR3 triplet is de-reddened with a colour-dependent law rather than a
+# scalar coefficient, so it is exempt from the EXT_COEFF check in _bands_for_row.
+_GAIA_TRIPLET = frozenset(('Gaia_G_EDR3', 'Gaia_BP_EDR3', 'Gaia_RP_EDR3'))
+
+# Bands already warned about, so the message appears once per process.
+_WARNED_NO_EXT_COEFF = set()
 
 # Per-process interpolator cache (keyed by sorted tuple of bands)
 INTERP_CACHE = {}
@@ -127,11 +280,38 @@ def _is_valid_number(x):
 def _bands_for_row(row):
     cols = row.colnames if hasattr(row, 'colnames') else row.keys()
     usable = []
-    for b in MINIMINT_BANDS:
+    # sorted(), not set iteration order. MINIMINT_BANDS is a set, so this loop
+    # used to yield its members in PYTHONHASHSEED order. The list it returns is
+    # handed to loglike_phot_theta, which accumulates `ll +=` over it, and
+    # floating-point addition is not associative -- so two runs of the same star
+    # on the same data got log-likelihoods differing in the last bits, which on
+    # a multimodal posterior is enough to flip which mode the sampler settles
+    # in. See CHANGELOG.md for what that was worth in practice.
+    for b in sorted(MINIMINT_BANDS):
         if b in cols:
             errc = _pick_err_col(b, cols)
             if errc and _is_valid_number(row[b]) and _is_valid_number(row[errc]) and float(row[errc]) > 0:
                 usable.append(b)
+
+    # A band with no extinction coefficient contributes nothing: the likelihood
+    # does EXT_COEFF.get(band), gets None and `continue`s. Before this release
+    # that happened silently, so a fit could report ten bands and use six, and
+    # the band list written to summary.json was wrong. 23 of the names in
+    # MINIMINT_BANDS have no coefficient, among them every Pan-STARRS band,
+    # DECam_u and TESS. Exclude them here instead, once and loudly, so the
+    # reported list is the list that was used and the `len(bands) < 3` test
+    # below counts only bands that do something.
+    dropped = [b for b in usable if b not in EXT_COEFF and b not in _GAIA_TRIPLET]
+    if dropped:
+        for b in dropped:
+            if b not in _WARNED_NO_EXT_COEFF:
+                _WARNED_NO_EXT_COEFF.add(b)
+                warnings.warn(
+                    f"band {b!r} is listed in MINIMINT_BANDS but has no EXT_COEFF "
+                    "entry, so it cannot be de-reddened and is excluded from the "
+                    "fit. Add a coefficient to EXT_COEFF to use it.",
+                    RuntimeWarning, stacklevel=2)
+        usable = [b for b in usable if b not in dropped]
     return usable
 
 def _build_observed_from_row(row, bands):
@@ -139,17 +319,20 @@ def _build_observed_from_row(row, bands):
     obs = {}
     # Teff / logg
     if 'Teff' in cols and _pick_err_col('Teff', cols):
-        T, Terr = row['Teff'], row[_pick_err_col('Teff', cols)] + 100 # minimum 100K error for systematic floor
+        T, Terr = row['Teff'], _inflate(row[_pick_err_col('Teff', cols)],
+                                        TEFF_ERR_ADDITIVE, TEFF_ERR_FLOOR)
         if _is_valid_number(T) and _is_valid_number(Terr) and float(Terr) > 0:
             obs['Teff'] = (float(T), float(Terr))
     if 'logg' in cols and _pick_err_col('logg', cols):
-        g, gerr = row['logg'], row[_pick_err_col('logg', cols)] + 0.1 # minimum 0.1 dex error for systematic floor
+        g, gerr = row['logg'], _inflate(row[_pick_err_col('logg', cols)],
+                                        LOGG_ERR_ADDITIVE, LOGG_ERR_FLOOR)
         if _is_valid_number(g) and _is_valid_number(gerr) and float(gerr) > 0:
             obs['logg'] = (float(g), float(gerr))
     # [Fe/H] prior
     feh_key = 'FEH_CAL' if 'FEH_CAL' in cols else ('FEH' if 'FEH' in cols else None)
     if feh_key and _pick_err_col(feh_key, cols):
-        f, ferr = row[feh_key], row[_pick_err_col(feh_key, cols)] + 0.1 # minimum 0.1 dex error for systematic floor
+        f, ferr = row[feh_key], _inflate(row[_pick_err_col(feh_key, cols)],
+                                         FEH_ERR_ADDITIVE, FEH_ERR_FLOOR)
         if _is_valid_number(f) and _is_valid_number(ferr) and float(ferr) > 0:
             obs['feh'] = (float(f), float(ferr))
     # Parallax prior (+ ZP)
@@ -159,7 +342,7 @@ def _build_observed_from_row(row, bands):
             plx = float(plx)
             if 'PARALLAX_ZPC' in cols and _is_valid_number(row['PARALLAX_ZPC']):
                 plx += float(row['PARALLAX_ZPC'])
-            if plx > 0:
+            if plx > 0 or PARALLAX_MODE != "published":
                 obs['parallax'] = (plx, float(perr))
     # EBV prior
     if 'EBV' in cols:
@@ -174,7 +357,7 @@ def _build_observed_from_row(row, bands):
         errc = _pick_err_col(b, cols)
         if errc is None:
             continue
-        val, err = row[b], row[errc] + 0.1 # minimum 0.1 mag error for systematic floor
+        val, err = row[b], _inflate(row[errc], PHOT_ERR_ADDITIVE, PHOT_ERR_FLOOR)
         if _is_valid_number(val) and _is_valid_number(err) and float(err) > 0:
             obs[b] = (float(val), float(err))
     return obs
@@ -228,7 +411,9 @@ def ptform_u5(u, obs, ebv_range,
     else:
         feh = FEH_MIN_ + u[2] * (FEH_MAX_ - FEH_MIN_)
     # Distance
-    plx_prior = obs.get('parallax')
+    # In "likelihood" mode the parallax is a datum, not a prior: the distance
+    # prior stays as DISTANCE_PRIOR and the measurement enters the likelihood.
+    plx_prior = obs.get('parallax') if PARALLAX_MODE in ("published", "prior") else None
     if plx_prior is not None:
         mu_p, sig_p = plx_prior
         a_p = (0.0 - mu_p) / sig_p
@@ -237,8 +422,7 @@ def ptform_u5(u, obs, ebv_range,
         d = 1.0e3 / plx
         d = np.clip(d, DIST_MIN_, DIST_MAX_)
     else:
-        logd = np.log10(DIST_MIN_) + u[3] * (np.log10(DIST_MAX_) - np.log10(DIST_MIN_))
-        d = 10**logd
+        d = _draw_distance(u[3], DIST_MIN_, DIST_MAX_)
     # E(B-V)
     
     EBV_MIN, EBV_MAX = ebv_range
@@ -288,6 +472,15 @@ def loglike_phot_theta(theta, obs, bands):
             o, e = obs[band]
             ll += -0.5 * ((o - (model[band] + dm + A)) / e)**2
 
+    # Parallax as a measurement of 1/d rather than as a prior on d. d is in pc,
+    # so 1e3/d is the model parallax in mas, directly comparable to the measured
+    # value including its sign. See PARALLAX_MODE.
+    if PARALLAX_MODE == "likelihood":
+        plx_obs = obs.get('parallax')
+        if plx_obs is not None:
+            mu_p, sig_p = plx_obs
+            ll += -0.5 * ((1e3 / d - mu_p) / sig_p)**2
+
     return float(ll)
 
 def loglike_spec_theta(theta, obs, bands):
@@ -328,7 +521,12 @@ def fit_stars_with_minimint(
       ebv_p16/p50/p84, ebv_multimodal
       lnZ, lnZ_err
     """
-    rng = np.random.default_rng(random_seed)
+    # One Generator per star, not one per table. The old code created a single
+    # Generator here and passed it to every star in turn, so the stream a star
+    # received depended on how many draws the stars before it had consumed:
+    # results moved when one star's sampling diverged, when the table was
+    # reordered, and when a run was split across jobs.
+    table_rng = np.random.default_rng(random_seed)
     _ensure_dir(output_path)
 
     # Prepare output columns if missing
@@ -349,6 +547,20 @@ def fit_stars_with_minimint(
 
     for i, row in tqdm(enumerate(table), total=len(table), desc="Fitting stars"):
         sid = str(row['source_id']) if 'source_id' in row.colnames else f"row{i}"
+
+        # Seeded from (random_seed, source_id) via a SeedSequence, so the stream
+        # a star gets depends only on which star it is -- not on the row order,
+        # nor on whether the table was split across jobs. RNG_PER_STAR=0 shares
+        # the table-level Generator instead, as the code did before.
+        if RNG_PER_STAR:
+            try:
+                star_key = int(row['source_id'])
+            except (KeyError, TypeError, ValueError):
+                star_key = i
+            star_rng = np.random.default_rng(
+                np.random.SeedSequence([int(random_seed), star_key]))
+        else:
+            star_rng = table_rng
 
         # Detect usable bands
         bands = _bands_for_row(row)
@@ -384,7 +596,7 @@ def fit_stars_with_minimint(
                 bound='multi', sample='rwalk',
                 pool=pool_in, queue_size=processes,
                 logl_args=logl_args, ptform_args=ptform_args,
-                rstate=rng,
+                rstate=star_rng,
             )
             ckpt_file = os.path.join(output_path, f'{sid}_checkpoint.h5') if debug else None
             sampler.run_nested(
