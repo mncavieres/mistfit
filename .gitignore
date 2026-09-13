@@ -181,3 +181,5 @@ cython_debug/
 .cursorindexingignore
 
 .DS_Store
+# Local agent handoff notes, not part of the package
+AGENTS.md
