@@ -5,6 +5,28 @@ Nested-sampling stellar-parameter fits using **dynesty** + **minimint** (MIST is
 This package provides a single public function, `fit_stars_with_minimint`, which takes an `astropy.table.Table` containing photometry (and optionally spectroscopy, parallax, and reddening priors), and returns the same table with posterior summaries appended. A simple CLI is also included.
 
 ---
+## What changed in 2026-09
+
+Four bugs fixed and two modelling choices exposed as settings. Two of the fixes
+change results even with every setting left at its default, so read
+[CHANGELOG.md](CHANGELOG.md) before rerunning anything you have published.
+
+| | |
+|---|---|
+| **band ordering** | the band list was built by iterating a `set`, so the order of the terms summed into the log-likelihood followed `PYTHONHASHSEED`. Two runs of the same stars on the same data gave distances differing by factors of up to 4.6. |
+| **silent band drops** | 23 of 58 "supported" bands have no extinction coefficient and were accepted, reported as used, then ignored by the likelihood. Every Pan-STARRS band was among them. |
+| **shared random stream** | one `Generator` per table, handed to each star in turn, so results depended on row order and on how the run was split across jobs. |
+| **`__version__`** | looked up a package name that no longer existed, so it was always `0+unknown`. |
+| **`PARALLAX_MODE`** | the parallax was discarded whenever measured ≤ 0 — which, for distant stars, is noise on a small positive number and a *selective* discard. Now used regardless of sign by default. |
+| **`DISTANCE_PRIOR`** | `loguniform` \| `flat` \| `volume`. The historical `loguniform` puts 70% of its prior mass inside 10 kpc. |
+
+Configuration is read from the environment, so a scheduler run can change one
+setting and nothing else:
+
+```bash
+PARALLAX_MODE=prior DISTANCE_PRIOR=volume LOGG_ERR_FLOOR=0.3 python run_nest.py
+```
+
 ## Citation
 
 If this tool is used in a publication, please cite **dynesty**, **minimint**, and Cavieres (in prep).
@@ -94,19 +116,32 @@ python -m mistfit.cli --help
 The code auto-detects any of the following present in your table (case-sensitive):
 `Bessell_I, PS_z, 2MASS_Ks, SkyMapper_u, Gaia_RP_MAW, Gaia_RP_DR2Rev, Gaia_BP_EDR3, PS_w, PS_r, SDSS_g, SkyMapper_v, Bessell_V, PS_y, SDSS_r, Bessell_U, Gaia_BP_DR2Rev, WISE_W1, PS_i, Tycho_V, SDSS_i, WISE_W4, Gaia_G_EDR3, Gaia_RP_EDR3, SkyMapper_r, Gaia_BP_MAWb, SDSS_z, Tycho_B, Bessell_B, DECam_i, Gaia_G_DR2Rev, DECam_Y, 2MASS_J, Kepler_Kp, DECam_u, GALEX_FUV, GALEX_NUV, PS_open, SDSS_u, DECam_r, SkyMapper_g, SkyMapper_z, PS_g, Kepler_D51, DECam_g, Bessell_R, DECam_z, Hipparcos_Hp, WISE_W2, TESS, 2MASS_H, WISE_W3, SkyMapper_i, Gaia_G_MAW, Gaia_BP_MAWf`.
 
+> **Bands with no extinction coefficient are excluded.** 23 of the names above
+> have no entry in `EXT_COEFF` and so cannot be de-reddened: every `PS_*` band,
+> `DECam_u`, `TESS`, `Tycho_B`, `Tycho_V`, `Hipparcos_Hp`, `GALEX_FUV`,
+> `GALEX_NUV`, `Kepler_Kp`, `Kepler_D51` and the Gaia `DR2Rev`/`MAW` variants.
+> Before the 2026-09 release these were accepted, reported as used, counted
+> towards the three-band minimum, and then silently ignored by the likelihood.
+> They are now excluded with a `RuntimeWarning`. Add a coefficient to
+> `EXT_COEFF` to bring one back. `VISTA_Y/J/H/Ks` **are** supported, with VHS
+> coefficients — do not pass VISTA photometry under 2MASS column names.
+
 > **Gaia special case**: If *all three* Gaia EDR3 bands (`Gaia_G_EDR3`, `Gaia_BP_EDR3`, `Gaia_RP_EDR3`) are present **and** have uncertainties, a color-dependent extinction law is used for those bands; otherwise fixed extinction coefficients from the table below are used.
 
 ### Optional spectroscopy and priors
 
-* **Effective temperature:** `Teff` with `Teff_ERR` (or any allowed suffix). A minimum systematic floor of **100 K** is added internally.
-* **Surface gravity:** `logg` with `logg_ERR`. A minimum **0.1 dex** floor is added.
-* **Metallicity prior:** Either `FEH_CAL` or `FEH` with matching error column. A minimum **0.1 dex** floor is added. If neither is present, \[Fe/H] is free within global bounds.
-* **Parallax prior:** `PARALLAX` with `PARALLAX_ERR`. Optional zero-point correction in `PARALLAX_ZPC` is **added** to `PARALLAX` before use. Only positive effective parallaxes are used; otherwise the sampler falls back to a wide distance prior.
+* **Effective temperature:** `Teff` with `Teff_ERR` (or any allowed suffix). **100 K** is *added* to the quoted error (`TEFF_ERR_ADDITIVE`); an optional `TEFF_ERR_FLOOR` imposes a minimum instead.
+* **Surface gravity:** `logg` with `logg_ERR`. **0.1 dex** added (`LOGG_ERR_ADDITIVE`), optional `LOGG_ERR_FLOOR`.
+* **Metallicity prior:** Either `FEH_CAL` or `FEH` with matching error column. **0.1 dex** added (`FEH_ERR_ADDITIVE`), optional `FEH_ERR_FLOOR`. If neither is present, \[Fe/H] is free within global bounds.
+* **Parallax prior:** `PARALLAX` with `PARALLAX_ERR`. Optional zero-point correction in `PARALLAX_ZPC` is **added** to `PARALLAX` before use. Since 2026-09 the measurement is used **whatever its sign** (`PARALLAX_MODE`); the old behaviour of discarding non-positive parallaxes is `PARALLAX_MODE=published`.
 * **Reddening prior:** `EBV` with optional `EBV_ERR`. If `EBV` is present without an error, an uncertainty of **0.3** mag is assumed.
 
-### Photometry error floor
+### Photometry error budget
 
-For each band’s magnitude uncertainty, a **0.1 mag** systematic floor is added internally.
+**0.1 mag** is *added* to each band’s quoted uncertainty (`PHOT_ERR_ADDITIVE`).
+An optional `PHOT_ERR_FLOOR` imposes a minimum instead. Note these were always
+additive despite being described as floors in earlier versions of this file;
+both are now available and independently configurable.
 
 ---
 
@@ -128,7 +163,7 @@ The sampler explores a 5D parameter vector:
 
 * **Photometry-only mode**: Triggered when *both* `Teff` **and** `logg` are **not** simultaneously available with errors. The fit still runs using photometry (and any priors) and reports posteriors. This is the default for most catalog-only use cases.
 
-* **Missing parallax**: No `PARALLAX` prior → distance prior becomes wide log-uniform `[1e3, 2e5]` pc. If `PARALLAX` is present but ≤0 after adding `PARALLAX_ZPC`, it is ignored and the wide prior is used.
+* **Missing parallax**: No `PARALLAX` prior → the distance prior is whatever `DISTANCE_PRIOR` says, over `[DIST_MIN, DIST_MAX]`. A present but non-positive `PARALLAX` is **used** since 2026-09 (`PARALLAX_MODE`), not ignored — for a distant sample a negative measured parallax is noise on a small positive number, and discarding it is a selective loss.
 
 * **Missing EBV**: No `EBV` column → E(B−V) prior is uniform over the global `ebv_range` (default `[0.0, 1.5]`). If `EBV` exists **without** an error, we assume `EBV_ERR = 0.3` mag and set the prior to ±5σ around that value (clipped to `[0, 1.5]`).
 
@@ -253,8 +288,8 @@ fit_stars_with_minimint(
 
 ## Notes & caveats
 
-* Photometric/spectroscopic errors get minimum floors (0.1 mag, 100 K, 0.1 dex) to account for systematics.
-* Distance prior reverts to broad log-uniform if parallax is unusable (non-positive after ZP correction).
+* Photometric/spectroscopic errors are inflated additively by default (0.1 mag, 100 K, 0.1 dex); optional floors are available. See `CHANGELOG.md`.
+* The Gaia parallax is used regardless of sign by default, and the distance prior used when it is not acting as one is selectable (`DISTANCE_PRIOR`). The historical `loguniform` default puts **70% of its mass inside 10 kpc** over the default bounds, which matters if your targets are distant.
 * Evidence (`lnZ`) can be compared between phot-only vs spec+phot runs for model comparison, but be mindful of different likelihood terms.
 * Multimodality flags are heuristic; inspect posteriors/plots for complex cases.
 
