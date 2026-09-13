@@ -27,6 +27,75 @@ setting and nothing else:
 PARALLAX_MODE=prior DISTANCE_PRIOR=volume LOGG_ERR_FLOOR=0.3 python run_nest.py
 ```
 
+## Choosing settings for your science case
+
+There is no single right answer here, which is why these are settings rather
+than a decision baked into the code. What follows is guidance, not a
+recommendation — the right choice depends on how informative your parallaxes
+are and where your targets actually sit.
+
+### The one question that decides most of it
+
+**How informative is your parallax?** Not whether it is positive — whether
+`|ϖ| / σ_ϖ` is large. For a star at 60 kpc the true parallax is 0.017 mas
+against a typical Gaia uncertainty of 0.04–0.15 mas, so the measurement says
+little beyond "not nearby". For a star at 2 kpc it is 0.5 mas and pins the
+distance on its own.
+
+| your sample | suggested | why |
+|---|---|---|
+| nearby, ϖ S/N ≳ 5 | `PARALLAX_MODE=likelihood`, `DISTANCE_PRIOR` barely matters | the parallax dominates; the likelihood form is the correct one and the prior is not doing the work |
+| distant, ϖ S/N ≲ 2, posteriors multimodal | `PARALLAX_MODE=prior` | the parallax shapes the *proposals*, so the sampler cannot spend live points where the parallax forbids. This is the most robust option when the isochrone posterior has competing modes |
+| distant, but you want the cleanest formulation | `PARALLAX_MODE=likelihood`, `DISTANCE_PRIOR=volume` | no truncation, no clip, no Jacobian — but check the diagnostics below, because the likelihood form samples less reliably |
+| no parallax at all | `DISTANCE_PRIOR` is doing everything | pick it from where your targets are; `loguniform` puts 70% of its mass inside 10 kpc |
+| reproducing a pre-2026-09 run | `PARALLAX_MODE=published RNG_PER_STAR=0` | see CHANGELOG; it will not be bit-identical |
+
+### The trade-off between `prior` and `likelihood`
+
+Both use the parallax regardless of sign. They differ in *where* it enters, and
+the difference is not only formal:
+
+* `prior` makes it a hard geometric constraint. The sampler cannot propose a
+  distance the parallax excludes. Robust, but it carries an implicit 1/d²
+  Jacobian, so for a star whose parallax is genuinely uninformative it can still
+  pull the distance inward against the photometry's preference.
+* `likelihood` makes it a soft penalty. Formally cleaner — it is what
+  MINESweeper and SpecDis do — but a competing likelihood mode can outbid the
+  penalty. On one 18-star test set, four stars fell into a pre-main-sequence
+  solution whose `lnZ` was 31–87 nats *worse* than what `prior` found for the
+  same star.
+
+If you use `likelihood`, pair it with a distance prior that does not seed the
+sampler in the wrong place, and check the diagnostics below.
+
+### Error floors
+
+Use `*_ERR_FLOOR` when your pipeline reports uncertainties that are implausibly
+small rather than merely optimistic — spectroscopic `logg` quoted to 0.0004 dex
+will otherwise pin the fit wherever it landed. Use `*_ERR_ADDITIVE` (the
+default) when the quoted errors are believable and you want to fold in a
+systematic. They compose: `max(err + additive, floor)`.
+
+Note the interaction: a loose gravity constraint and a discarded parallax
+together are what let fits collapse onto pre-main-sequence solutions. Either
+one alone was enough to prevent it in testing, so if you must use a wide `logg`
+floor, keep the parallax.
+
+### Diagnostics worth running whatever you choose
+
+None of these settings can be validated from the fitted distance alone. Check,
+per star:
+
+* how much posterior mass sits below `logage` 6 — a halo giant fitted as a
+  pre-main-sequence star is the classic failure;
+* how much sits on `DIST_MAX`, where `PARALLAX_MODE=prior` clips;
+* the winning model's `logg` against the spectroscopic value you supplied, in σ;
+* the parallax implied by the fitted distance against the measured one, in σ,
+  *whether or not the run used it*.
+
+A fit that disagrees with its own inputs by many σ is an artifact regardless of
+how tight its error bars look.
+
 ## Citation
 
 If this tool is used in a publication, please cite **dynesty**, **minimint**, and Cavieres (in prep).
