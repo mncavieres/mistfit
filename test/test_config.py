@@ -19,6 +19,7 @@ CONFIG_VARS = (
     "TEFF_ERR_ADDITIVE", "LOGG_ERR_ADDITIVE", "FEH_ERR_ADDITIVE",
     "PHOT_ERR_ADDITIVE", "TEFF_ERR_FLOOR", "LOGG_ERR_FLOOR",
     "FEH_ERR_FLOOR", "PHOT_ERR_FLOOR",
+    "SAMPLE_COORD", "EEP_MIN", "EEP_MAX",
 )
 
 
@@ -197,7 +198,94 @@ def test_a_stars_random_stream_depends_only_on_which_star_it_is():
 
 # ------------------------------------------------------------------- validation
 @pytest.mark.parametrize("var,bad", [
-    ("PARALLAX_MODE", "nonsense"), ("DISTANCE_PRIOR", "nonsense")])
+    ("PARALLAX_MODE", "nonsense"), ("DISTANCE_PRIOR", "nonsense"),
+    ("SAMPLE_COORD", "nonsense")])
 def test_an_unknown_setting_is_refused_not_ignored(var, bad):
     with pytest.raises(ValueError, match=var):
         load(**{var: bad})
+
+
+# ------------------------------------------------------------ warning plumbing
+def test_mistfit_warnings_survive_the_modules_own_runtime_filter():
+    """The band-exclusion warning must reach the user under real conditions.
+
+    The test above catches it with simplefilter("always"), which overrides the
+    module's own filters -- so it passed even while the warning was, in
+    practice, silent: core.py raised it as a RuntimeWarning and then installed
+    filterwarnings("ignore", RuntimeWarning) at import. Here the module's own
+    filters are left in place, which is what a user actually gets.
+    """
+    m = load()
+    orphan = sorted(b for b in m.MINIMINT_BANDS
+                    if b not in m.EXT_COEFF and b not in m._GAIA_TRIPLET)
+    if not orphan:
+        pytest.skip("every band has a coefficient")
+    row = Row()
+    for b in orphan[:1] + ["DECam_g", "DECam_r", "DECam_i"]:
+        row[b], row[b + "_ERR"] = 15.0, 0.01
+    m._WARNED_NO_EXT_COEFF.clear()
+    with warnings.catch_warnings(record=True) as caught:
+        # deliberately NO simplefilter: keep whatever core.py installed
+        m._bands_for_row(row)
+    assert any("EXT_COEFF" in str(c.message) for c in caught), (
+        "band exclusion was silent under the module's own warning filters")
+
+
+def test_numpy_runtime_noise_is_still_suppressed():
+    """Silencing sampler chatter is the reason the filter exists; keep it."""
+    m = load()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.warn("overflow encountered in exp", RuntimeWarning)
+    assert not caught, "RuntimeWarning noise is no longer suppressed"
+    assert issubclass(m.MistfitWarning, UserWarning)
+
+
+# ------------------------------------------------------------ sampling coordinate
+def test_mass_age_remains_the_default_coordinate():
+    assert load().SAMPLE_COORD == "mass_age"
+    assert load(SAMPLE_COORD="mass_eep").SAMPLE_COORD == "mass_eep"
+
+
+def test_second_coordinate_is_an_eep_only_under_mass_eep():
+    """ptform's second element switches meaning; its range is the giveaway."""
+    u = np.array([0.5, 0.5, 0.5, 0.5, 0.5])
+    obs, ebv_range = {}, (0.0, 0.5)
+
+    age = load(SAMPLE_COORD="mass_age").ptform_u5(u, obs, ebv_range)[1]
+    assert 5.0 <= age <= 10.2, "logAge left its prior range"
+
+    m = load(SAMPLE_COORD="mass_eep")
+    eep = m.ptform_u5(u, obs, ebv_range)[1]
+    assert m.EEP_MIN <= eep <= m.EEP_MAX
+    assert eep > 100, "second coordinate is not an EEP under mass_eep"
+
+
+def test_eep_bounds_are_configurable():
+    m = load(SAMPLE_COORD="mass_eep", EEP_MIN=300, EEP_MAX=400)
+    assert (m.EEP_MIN, m.EEP_MAX) == (300.0, 400.0)
+    eep = m.ptform_u5(np.full(5, 0.5), {}, (0.0, 0.5))[1]
+    assert 300.0 <= eep <= 400.0
+
+
+@pytest.mark.parametrize("mass,eep,feh", [
+    (0.9, 2000, -1.2),     # EEP past the end of the track
+    (0.9, 600, -5.0),      # [Fe/H] off the grid
+    (0.05, 600, -1.2),     # mass below the grid
+    (1e6, 1e6, 99.0),      # nothing about this is on the grid
+])
+def test_off_grid_points_map_to_nan_not_to_zero(mass, eep, feh):
+    """minimint returns 0.0 off-grid; we must not pass that on as an age.
+
+    0.0 is finite, so an isfinite() guard lets it through, and it would then
+    be read as an age of one year. logage_from_eep translates the sentinel so
+    that every caller's finiteness check means what it says.
+    """
+    m = load(SAMPLE_COORD="mass_eep")
+    assert np.isnan(m.logage_from_eep(mass, eep, feh))
+
+
+def test_on_grid_points_still_return_a_real_age():
+    m = load(SAMPLE_COORD="mass_eep")
+    rgb = m.logage_from_eep(0.9, 600, -1.2)
+    ms = m.logage_from_eep(0.9, 250, -1.2)
+    assert m.LOGAGE_MIN <= ms < rgb <= m.LOGAGE_MAX, (ms, rgb)

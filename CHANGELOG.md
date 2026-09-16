@@ -1,5 +1,78 @@
 # Changelog
 
+## 2026-09b — the EEP sampling coordinate, and a warning that was never heard
+
+### NEW — `SAMPLE_COORD`: sample in EEP instead of age
+
+`SAMPLE_COORD=mass_eep` samples (mass, EEP) and derives logAge from them, the
+way MINESweeper does (Cargile et al. 2020). The default stays `mass_age`.
+
+The two parameterisations describe the same model but differ in how much of the
+giant branch the sampler can reach. At a fixed old age the whole RGB sits in a
+narrow sliver of mass just below `getMaxMass(logAge, feh)`, and under
+`mass_age` the likelihood cuts it off there. On a 0.9 Msun, [Fe/H] = −1.2
+track the RGB spans 47.7% of a U(200, 808) EEP prior, against 1.8% of a
+4–13 Gyr age prior. Drawing 4000 prior points and keeping those on the grid,
+**none reached logg < 2 under `mass_age`, against 12.8% under `mass_eep`**,
+and the lowest reachable logg was 3.09 against 0.56.
+
+Measured on 18 distant K giants with spectroscopic logg, comparing the model
+prediction at each posterior sample against the measurement:
+
+| coordinate | median \|Δlog g\| | stars > 3σ | Σ lnZ |
+|---|---|---|---|
+| `mass_age` | 1.47σ | 2/18 | −385 |
+| `mass_eep` | **1.15σ** | 2/18 | **−300** |
+
+at otherwise identical priors and likelihood. A real but moderate improvement,
+plus ~85 nats of evidence. `mass_age` is not broken — it is a worse coordinate
+for evolved stars. **Prefer `mass_eep` for giants**; for dwarfs and subgiants
+there is little to choose between them.
+
+The reported posterior is unchanged: mass, logAge, [Fe/H], distance, E(B−V).
+The EEP column is converted back to logAge before anything is summarised, so
+percentiles, multimodality flags, corner plots and the output table see the
+columns they always saw. Note that a dynesty **checkpoint** is written during
+sampling and therefore still holds the raw EEP in column 1; anything reading a
+checkpoint directly must convert for itself. The two are unambiguous by range
+(logAge ≤ 10.2, EEP ≥ 200).
+
+The implied age prior is whatever uniform-in-EEP induces; it is **not** uniform
+in age. That is MINESweeper's choice too, and it is the honest description of
+the trade: an age prior and an evolutionary-stage prior cannot both be uniform.
+
+`EEP_MIN` / `EEP_MAX` default to 200 and 808.
+
+### FIXED — mistfit's own warnings were silenced by its own filter
+
+`core.py` raised the band-exclusion warning added in 2026-09 as a
+`RuntimeWarning`, then installed `filterwarnings("ignore", RuntimeWarning)` at
+import to suppress numpy/scipy sampling chatter. The filter swallowed the
+warning, so the exclusion documented as happening "once and loudly" was in fact
+silent in ordinary use.
+
+The test covering it passed anyway, because it called
+`warnings.simplefilter("always")` inside its `catch_warnings` block and so
+overrode the very filter that caused the bug. There is now a second test that
+leaves the module's own filters in place.
+
+Fixed by giving mistfit its own `MistfitWarning(UserWarning)` category, exempt
+from the RuntimeWarning filter. If you filter mistfit warnings by category,
+catch `mistfit.core.MistfitWarning`.
+
+### FIXED — off-grid EEP lookups returned 0.0, which is finite
+
+`minimint.TheoryInterpolator.getLogAgeFromEEP` signals "off the grid" by
+returning **0.0**, not NaN — an EEP past the end of the track, an [Fe/H]
+outside the grid and a mass below it all come back as exactly 0.0. That is a
+trap: 0.0 passes an `np.isfinite` guard and would be read as an age of one
+year. Since MIST never produces a logAge below `LOGAGE_MIN = 5`, any
+non-positive return is unambiguously the sentinel, and `logage_from_eep` now
+translates it to NaN so that every caller's finiteness check means what it
+says.
+
+---
+
 ## 2026-09 — four bugs fixed, two modelling choices exposed
 
 Three of these change results. Read "What this changes for you" at the bottom

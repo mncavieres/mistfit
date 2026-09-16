@@ -19,6 +19,7 @@ change results even with every setting left at its default, so read
 | **`__version__`** | looked up a package name that no longer existed, so it was always `0+unknown`. |
 | **`PARALLAX_MODE`** | the parallax was discarded whenever measured ≤ 0 — which, for distant stars, is noise on a small positive number and a *selective* discard. Now used regardless of sign by default. |
 | **`DISTANCE_PRIOR`** | `loguniform` \| `flat` \| `volume`. The historical `loguniform` puts 70% of its prior mass inside 10 kpc. |
+| **`SAMPLE_COORD`** | `mass_age` \| `mass_eep`. Sampling in EEP rather than age reaches the giant branch, which spans 47.7% of a U(200, 808) EEP prior against 1.8% of a 4–13 Gyr age prior. |
 
 Configuration is read from the environment, so a scheduler run can change one
 setting and nothing else:
@@ -48,7 +49,30 @@ distance on its own.
 | distant, ϖ S/N ≲ 2, posteriors multimodal | `PARALLAX_MODE=prior` | the parallax shapes the *proposals*, so the sampler cannot spend live points where the parallax forbids. This is the most robust option when the isochrone posterior has competing modes |
 | distant, but you want the cleanest formulation | `PARALLAX_MODE=likelihood`, `DISTANCE_PRIOR=volume` | no truncation, no clip, no Jacobian — but check the diagnostics below, because the likelihood form samples less reliably |
 | no parallax at all | `DISTANCE_PRIOR` is doing everything | pick it from where your targets are; `loguniform` puts 70% of its mass inside 10 kpc |
-| reproducing a pre-2026-09 run | `PARALLAX_MODE=published RNG_PER_STAR=0` | see CHANGELOG; it will not be bit-identical |
+| reproducing a pre-2026-09 run | `PARALLAX_MODE=published RNG_PER_STAR=0 SAMPLE_COORD=mass_age` | see CHANGELOG; it will not be bit-identical |
+
+### The other question: are your stars evolved?
+
+**`SAMPLE_COORD` decides how well the sampler can resolve the giant branch.**
+Under the default `mass_age`, at a fixed old age the whole RGB lies in a narrow
+sliver of mass just below `getMaxMass(logAge, feh)`, and the likelihood cuts it
+off there. Under `mass_eep` that boundary disappears: the constraint is simply
+whether (mass, EEP, [Fe/H]) exists on the MIST grid.
+
+| your sample | suggested | why |
+|---|---|---|
+| giants (RGB, AGB), or anything where `logg ≲ 2` | `SAMPLE_COORD=mass_eep` | the RGB spans 47.7% of the EEP prior against 1.8% of a 4–13 Gyr age prior; in 4000 prior draws, none reached `logg < 2` under `mass_age` against 12.8% under `mass_eep` |
+| dwarfs and subgiants | either | the main sequence is well resolved in both coordinates |
+| you want an interpretable age prior | `mass_age` | uniform-in-EEP is **not** uniform in age; an age prior and an evolutionary-stage prior cannot both be uniform |
+
+On 18 distant K giants with spectroscopic `logg`, `mass_eep` agreed with the
+spectroscopy at a median 1.15σ against 1.47σ for `mass_age`, and gained ~85
+nats of summed evidence at otherwise identical settings. A real but moderate
+improvement: `mass_age` is not broken, it is a worse coordinate for giants.
+
+The output columns are identical either way — the EEP is converted back to
+logAge before anything is summarised. Only a raw dynesty **checkpoint** holds
+the EEP in column 1.
 
 ### The trade-off between `prior` and `likelihood`
 
