@@ -132,7 +132,7 @@ If this tool is used in a publication, please cite **dynesty**, **minimint**, an
 ## Installation & requirements
 
 * Python ≥ 3.9 recommended
-* Dependencies: `numpy`, `scipy`, `matplotlib` (headless OK), `astropy`, `dynesty`, `minimint`, `corner` (optional, for debug corner plots)
+* Dependencies: `numpy`, `scipy`, `matplotlib` (headless OK), `astropy`, `dynesty`, `minimint`, `tqdm`, `corner` (optional, for debug corner plots)
 
 Install with pip (example):
 
@@ -200,7 +200,7 @@ python -m mistfit.cli --help
 * **Photometric band columns** use the *minimint* band names (see list below). Examples: `Gaia_G_EDR3`, `DECam_g`, `2MASS_Ks`.
 * The **uncertainty column** for a quantity `<NAME>` is discovered by trying these suffixes (first match wins):
 
-  * `<NAME>_ERR`, `<NAME>_ERRMAG`, `<NAME>_SIG`, `<NAME>_E`
+  * `<NAME>_ERR`, `<NAME>_ERRMAG`, `<NAME>_SIG`, `<NAME>_E`, `<NAME>_error`
 
   Examples: `DECam_g_ERR`, `Gaia_BP_EDR3_ERR`, `Teff_ERR`, `PARALLAX_E`.
 
@@ -215,7 +215,7 @@ The code auto-detects any of the following present in your table (case-sensitive
 > `GALEX_NUV`, `Kepler_Kp`, `Kepler_D51` and the Gaia `DR2Rev`/`MAW` variants.
 > Before the 2026-09 release these were accepted, reported as used, counted
 > towards the three-band minimum, and then silently ignored by the likelihood.
-> They are now excluded with a `RuntimeWarning`. Add a coefficient to
+> They are now excluded with a `MistfitWarning`. Add a coefficient to
 > `EXT_COEFF` to bring one back. `VISTA_Y/J/H/Ks` **are** supported, with VHS
 > coefficients — do not pass VISTA photometry under 2MASS column names.
 
@@ -223,16 +223,16 @@ The code auto-detects any of the following present in your table (case-sensitive
 
 ### Optional spectroscopy and priors
 
-* **Effective temperature:** `Teff` with `Teff_ERR` (or any allowed suffix). **100 K** is *added* to the quoted error (`TEFF_ERR_ADDITIVE`); an optional `TEFF_ERR_FLOOR` imposes a minimum instead.
+* **Effective temperature:** `Teff` with `Teff_ERR` (or any allowed suffix). **100 K** is *added* to the quoted error (`TEFF_ERR_ADDITIVE`); an optional `TEFF_ERR_FLOOR` then imposes a minimum on the result.
 * **Surface gravity:** `logg` with `logg_ERR`. **0.1 dex** added (`LOGG_ERR_ADDITIVE`), optional `LOGG_ERR_FLOOR`.
 * **Metallicity prior:** Either `FEH_CAL` or `FEH` with matching error column. **0.1 dex** added (`FEH_ERR_ADDITIVE`), optional `FEH_ERR_FLOOR`. If neither is present, \[Fe/H] is free within global bounds.
 * **Parallax prior:** `PARALLAX` with `PARALLAX_ERR`. Optional zero-point correction in `PARALLAX_ZPC` is **added** to `PARALLAX` before use. Since 2026-09 the measurement is used **whatever its sign** (`PARALLAX_MODE`); the old behaviour of discarding non-positive parallaxes is `PARALLAX_MODE=published`.
-* **Reddening prior:** `EBV` with optional `EBV_ERR`. If `EBV` is present without an error, an uncertainty of **0.3** mag is assumed.
+* **Reddening prior:** `EBV` with optional `EBV_ERR`. If `EBV` is present without an error, an uncertainty of **0.1** mag is assumed.
 
 ### Photometry error budget
 
 **0.1 mag** is *added* to each band’s quoted uncertainty (`PHOT_ERR_ADDITIVE`).
-An optional `PHOT_ERR_FLOOR` imposes a minimum instead. Note these were always
+An optional `PHOT_ERR_FLOOR` then imposes a minimum on the result. Note these were always
 additive despite being described as floors in earlier versions of this file;
 both are now available and independently configurable.
 
@@ -242,13 +242,13 @@ both are now available and independently configurable.
 
 The sampler explores a 5D parameter vector:
 
-* **Mass** \[M☉], prior \~ Salpeter (α = 2.35) within `[0.1, 5.0]` and model’s maximum mass for the chosen age/metallicity
-* **log10(Age/yr)** uniform in `[5.0, 10.1139]`
+* **Mass** \[M☉], prior \~ Salpeter (α = 2.35) within `[0.1, 100]` (`M_MIN`, `M_MAX`) and, under `SAMPLE_COORD=mass_age`, below the model’s maximum mass for the chosen age/metallicity
+* **log10(Age/yr)** uniform in `[LOGAGE_MIN, LOGAGE_MAX]`, default `[5.0, 10.1139]` (13 Gyr), both settable from the environment. Under `SAMPLE_COORD=mass_eep` logAge is derived from the EEP instead, and points outside the window are rejected.
 * **\[Fe/H]**: truncated normal around the provided prior (if any), else uniform in `[-2.9, 0.9]`
-* **Distance** \[pc]: from **parallax prior** if provided; otherwise log-uniform in `[1e3, 2e5]`
-* **E(B−V)**: uniform in `[EBV_MIN, EBV_MAX]`, default `[0.0, 1.5]`, or tightened to ±5σ around the `EBV` prior (clipped to `[0, 1.5]`).
+* **Distance** \[pc], within `[10, 2e5]` (`DIST_MIN`, `DIST_MAX`): from the **parallax** if one is given — `1000/ϖ`, with ϖ drawn from the measurement's Gaussian truncated at zero — otherwise from `DISTANCE_PRIOR`, log-uniform by default. Under `PARALLAX_MODE=likelihood` the distance always comes from `DISTANCE_PRIOR` and the parallax enters the likelihood instead.
+* **E(B−V)**: uniform over `ebv_range`, default `[EBV_MIN_DEFAULT, EBV_MAX_DEFAULT]` = `[0.0, 1.5]`; for a star with an `EBV` value, over ±5σ around it, clipped to `[EBV_MIN_DEFAULT, EBV_MAX_DEFAULT]`.
 
-**Likelihood** combines photometry (with extinction and distance modulus) and, when available, spectroscopic terms for `Teff` and `logg`.
+**Likelihood** combines photometry (with extinction and distance modulus), spectroscopic terms for `Teff` and `logg` when both are available, and the parallax under `PARALLAX_MODE=likelihood`.
 
 ---
 
@@ -258,7 +258,7 @@ The sampler explores a 5D parameter vector:
 
 * **Missing parallax**: No `PARALLAX` prior → the distance prior is whatever `DISTANCE_PRIOR` says, over `[DIST_MIN, DIST_MAX]`. A present but non-positive `PARALLAX` is **used** since 2026-09 (`PARALLAX_MODE`), not ignored — for a distant sample a negative measured parallax is noise on a small positive number, and discarding it is a selective loss.
 
-* **Missing EBV**: No `EBV` column → E(B−V) prior is uniform over the global `ebv_range` (default `[0.0, 1.5]`). If `EBV` exists **without** an error, we assume `EBV_ERR = 0.3` mag and set the prior to ±5σ around that value (clipped to `[0, 1.5]`).
+* **Missing EBV**: No `EBV` column → E(B−V) prior is uniform over the global `ebv_range` (default `[0.0, 1.5]`). If `EBV` exists **without** an error, we assume `EBV_ERR = 0.1` mag and set the prior to ±5σ around that value (clipped to `[EBV_MIN_DEFAULT, EBV_MAX_DEFAULT]`, default `[0, 1.5]`).
 
 * **Photometry naming mismatches**: Columns must exactly match supported *minimint* band names. If your catalog uses different names, rename columns before running (see snippet below).
 
@@ -276,6 +276,7 @@ For each star, the following columns are appended:
 * `dist_pc_p16`, `dist_pc_p50`, `dist_pc_p84`, `dist_multimodal`
 * `ebv_p16`, `ebv_p50`, `ebv_p84`, `ebv_multimodal`
 * `lnZ`, `lnZ_err` (Bayesian evidence and its uncertainty from dynesty)
+* `fit_mode`: `spec` if both `Teff` and `logg` entered the likelihood, else `phot`
 
 **Multimodality flags** are binary and computed by KDE peak counting on the 1D posterior for each parameter (requires ≥200 samples; peak prominence ≳ 5% of max). `1` indicates multiple significant modes.
 
@@ -298,6 +299,7 @@ When not using the Gaia color-dependent law, these coefficients are applied:
 * SkyMapper: `u=5.017`, `v=4.750`, `g=3.651`, `r=3.032`, `i=2.325`, `z=1.790`
 * WISE: `W1=W2=W3=W4=0.0`
 * Johnson–Cousins/Bessell: `U=5.47`, `B=4.32`, `V=3.31`, `R=2.68`, `I=1.85`
+* VISTA (VHS): `Y=1.310`, `J=0.928`, `H=0.592`, `Ks=0.388`
 
 ---
 
@@ -371,7 +373,7 @@ fit_stars_with_minimint(
     processes: int = 4,
     debug: bool = False,
     random_seed: int = 42,
-    ebv_range: tuple[float, float] = (0.0, 1.5),
+    ebv_range: tuple[float, float] | None = None,  # None: (EBV_MIN_DEFAULT, EBV_MAX_DEFAULT) = (0.0, 1.5)
 ) -> Table
 ```
 
@@ -383,7 +385,7 @@ fit_stars_with_minimint(
 
 * Photometric/spectroscopic errors are inflated additively by default (0.1 mag, 100 K, 0.1 dex); optional floors are available. See `CHANGELOG.md`.
 * The Gaia parallax is used regardless of sign by default, and the distance prior used when it is not acting as one is selectable (`DISTANCE_PRIOR`). The historical `loguniform` default puts **70% of its mass inside 10 kpc** over the default bounds, which matters if your targets are distant.
-* Evidence (`lnZ`) can be compared between phot-only vs spec+phot runs for model comparison, but be mindful of different likelihood terms.
+* Evidence (`lnZ`) is comparable only between fits with the same likelihood — `PARALLAX_MODE=published` against `prior`, say, or one `DISTANCE_PRIOR` against another. A spec+phot and a phot-only fit of the same star are not comparable, and neither is `PARALLAX_MODE=likelihood` against the other modes: each adds likelihood terms, so its `lnZ` is the evidence for different data.
 * Multimodality flags are heuristic; inspect posteriors/plots for complex cases.
 
 ---
