@@ -286,9 +286,47 @@ _WARNED_NO_EXT_COEFF = set()
 # [LOGAGE_MIN, LOGAGE_MAX]; it is NOT uniform in age. That is MINESweeper's
 # choice too, and it is the honest description of the trade: an age prior and an
 # evolutionary-stage prior cannot both be uniform.
+#
+#   "mass_age_weighted"
+#               sample (mass, logAge) as "mass_age" does, but draw the mass from
+#               a proposal that piles points up against getMaxMass(logAge, feh),
+#               where the giant branch lives, and divide it back out of the
+#               likelihood. Adapted from MassMapper in the rvspecfit-based
+#               distance code (distance_tools.py; not distributed with mistfit).
+#
+# The proposal q(m | logAge, feh) is a broken power law with its edge at the
+# isochrone's own maximum mass, mmax:
+#
+#     q(m) ~ const                       M_MIN < m < m1
+#     q(m) ~ (1 - m/mmax)^-C             m1 < m < m2
+#     q(m) ~ const (continuous)          m2 < m < mmax
+#
+# with m1 = mmax (1 - 10^-1.851), m2 = mmax (1 - 10^-3.51), C = 1.545: the
+# empirically-tuned constants of the original. About a quarter of the draws land
+# in the last 1.4% of the mass range, where the whole post-main-sequence sits at
+# a fixed age, against ~0.1% of Salpeter draws (a 0.9 Msun, 10 Gyr isochrone):
+# some 250x more points on the giant branch. About 10% land in the last 0.03%,
+# the TP-AGB and post-AGB, ~4000x Salpeter -- which is why only this mode finds
+# the solutions there (CHANGELOG 2026-09c). The likelihood then adds
+# ln S(m) - ln q(m), S being the same Salpeter density "mass_age" draws from,
+# so the target is unchanged:
+#
+#     prior x likelihood  =  q(m) x [S(m)/q(m) x L]
+#
+# THE MODEL IS IDENTICAL TO "mass_age": same prior, same likelihood, same
+# posterior -- and, unlike "mass_eep", the same evidence, so lnZ is directly
+# comparable between the two. Only the sampler's view of it changes. That makes
+# this the option for resolving the giant branch without also swapping the
+# uniform age prior for a uniform evolutionary-stage prior.
+#
+# One cost: at logAge <~ 6.6 the isochrone reaches past M_MAX, the proposal is
+# truncated there and is close to uniform on [M_MIN, M_MAX], so a young
+# low-mass solution occupies a sliver of the unit cube it would not under
+# Salpeter. Irrelevant for old populations; worth knowing for young ones.
 SAMPLE_COORD = os.environ.get("SAMPLE_COORD", "mass_age").strip().lower()
-if SAMPLE_COORD not in ("mass_age", "mass_eep"):
-    raise ValueError(f"SAMPLE_COORD must be mass_age|mass_eep, got {SAMPLE_COORD!r}")
+if SAMPLE_COORD not in ("mass_age", "mass_eep", "mass_age_weighted"):
+    raise ValueError(
+        f"SAMPLE_COORD must be mass_age|mass_eep|mass_age_weighted, got {SAMPLE_COORD!r}")
 
 # MIST EEPs run 1-808. MINESweeper samples U(200, 808): from the zero-age main
 # sequence to the end of the thermally-pulsing AGB.
@@ -328,6 +366,129 @@ def logage_from_eep(mass, eep, feh):
         return float("nan")
     out = float(value[0])
     return out if out > 0.0 else float("nan")
+
+
+# --- the SAMPLE_COORD="mass_age_weighted" mass proposal ----------------------
+# Break points and slope of the proposal, as fractions of the isochrone's
+# maximum mass. Taken unchanged from MassMapper.
+_GB_CUT1 = 1.0 - 10**(-1.851)
+_GB_CUT2 = 1.0 - 10**(-3.51)
+_GB_SLOPE = 1.545
+
+# The last (logAge, feh) -> maxMass lookup, per process. dynesty evaluates the
+# prior transform and then the likelihood of the same point in the same worker,
+# and both need getMaxMass for it, so one entry turns the second lookup into a
+# dictionary hit.
+_MAXMASS_LAST = {}
+
+
+def _max_mass(la, feh):
+    """getMaxMass(logAge, feh), or NaN if the isochrone does not exist."""
+    key = (float(la), float(feh))
+    hit = _MAXMASS_LAST.get(key)
+    if hit is not None:
+        return hit
+    try:
+        out = float(_theory().getMaxMass(key[0], key[1]))
+    except Exception:
+        out = float("nan")
+    _MAXMASS_LAST.clear()
+    _MAXMASS_LAST[key] = out
+    return out
+
+
+class GiantBranchMassProposal:
+    """q(m | logAge, feh): a mass density crowded against the isochrone's tip.
+
+    A port of MassMapper and its BrokenPowerLaw (see SAMPLE_COORD). The broken
+    power law has support [mmin, iso_maxmass]; if iso_maxmass exceeds mmax it
+    is truncated at mmax and renormalised, so ppf maps [0, 1] onto
+    [mmin, min(iso_maxmass, mmax)] and pdf integrates to one over it.
+    """
+
+    def __init__(self, iso_maxmass, mmin, mmax,
+                 cut1=_GB_CUT1, cut2=_GB_CUT2, C=_GB_SLOPE):
+        m3 = float(iso_maxmass)
+        if not (np.isfinite(m3) and m3 > mmin):
+            raise ValueError(f"no isochrone mass range above {mmin}: maxMass={m3}")
+        m0 = float(mmin)
+        m1 = max(m3 * cut1, m0)
+        m2 = max(m3 * cut2, m0)
+        self.m0, self.m1, self.m2, self.m3, self.C = m0, m1, m2, m3, C
+        self.A0 = 1.0 / (m1 - m0
+                         + (1 - m1/m3)**C * m3 / (C - 1)
+                         * ((1 - m2/m3)**(1 - C) - (1 - m1/m3)**(1 - C))
+                         + (1 - m1/m3)**C / (1 - m2/m3)**C * (m3 - m2))
+        self.A1 = self.A0 * (1 - m1/m3)**C
+        self.A2 = self.A1 / (1 - m2/m3)**C
+        self.c1 = self.A0 * (m1 - m0)            # CDF at m1
+        self.c2 = 1.0 - self.A2 * (m3 - m2)      # CDF at m2
+        self.mmax = float(mmax)
+        self.renorm = self._cdf(self.mmax) if self.mmax < m3 else 1.0
+
+    def _cdf(self, x):
+        m0, m1, m2, m3, C = self.m0, self.m1, self.m2, self.m3, self.C
+        if x <= m0:
+            return 0.0
+        if x <= m1:
+            return self.A0 * (x - m0)
+        if x <= m2:
+            return self.c1 + self.A1 * m3 / (1 - C) * (
+                (1 - m1/m3)**(1 - C) - (1 - x/m3)**(1 - C))
+        if x <= m3:
+            return self.c2 + self.A2 * (x - m2)
+        return 1.0
+
+    def cdf(self, x):
+        return min(self._cdf(float(x)) / self.renorm, 1.0)
+
+    def pdf(self, x):
+        x = float(x)
+        m0, m1, m2, m3 = self.m0, self.m1, self.m2, self.m3
+        if x <= m0 or x >= m3 or x >= self.mmax:
+            return 0.0
+        if x <= m1:
+            p = self.A0
+        elif x <= m2:
+            p = self.A1 / (1 - x/m3)**self.C
+        else:
+            p = self.A2
+        return p / self.renorm
+
+    def ppf(self, u):
+        y = float(np.clip(u, 0.0, 1.0)) * self.renorm
+        m0, m1, m2, m3, C = self.m0, self.m1, self.m2, self.m3, self.C
+        if y < self.c1:
+            x = m0 + y / self.A0
+        elif y < self.c2:
+            x = m3 * (1 - ((1 - m1/m3)**(1 - C)
+                           - (y - self.c1) * (1 - C) / (self.A1 * m3))**(1 / (1 - C)))
+        else:
+            x = m2 + (y - self.c2) / self.A2
+        return float(min(x, m3, self.mmax))
+
+
+def _salpeter_logpdf(m, mmin, mmax, alpha):
+    """ln of the normalised Salpeter density ptform_u5 draws masses from."""
+    e = 1.0 - alpha
+    return float(np.log(e / (mmax**e - mmin**e)) - alpha * np.log(m))
+
+
+def mass_weight_log(m, la, feh):
+    """ln S(m) - ln q(m | logAge, feh) for SAMPLE_COORD="mass_age_weighted".
+
+    Added to the log-likelihood to undo the proposal. -inf where the proposal
+    has no support: off the isochrone, or past its maximum mass -- exactly the
+    points "mass_age" rejects too.
+    """
+    try:
+        q = GiantBranchMassProposal(_max_mass(la, feh), M_MIN, M_MAX)
+    except ValueError:
+        return -np.inf
+    qm = q.pdf(m)
+    if not qm > 0.0:
+        return -np.inf
+    return _salpeter_logpdf(m, M_MIN, M_MAX, ALPHA_IMF) - float(np.log(qm))
 
 
 # Per-process interpolator cache (keyed by sorted tuple of bands)
@@ -505,7 +666,8 @@ def ptform_u5(u, obs, ebv_range,
     exp = 1.0 - ALPHA_IMF_
     m = (u[0] * (M_MAX_**exp - M_MIN_**exp) + M_MIN_**exp) ** (1.0 / exp)
     # Second coordinate: logAge sampled directly, or an EEP whose logAge is
-    # derived in the likelihood. See SAMPLE_COORD.
+    # derived in the likelihood. See SAMPLE_COORD. Under "mass_age_weighted" the
+    # mass is redrawn below, once logAge and [Fe/H] are known.
     if SAMPLE_COORD == "mass_eep":
         la = EEP_MIN + u[1] * (EEP_MAX - EEP_MIN)      # an EEP, not a logAge
     else:
@@ -519,6 +681,20 @@ def ptform_u5(u, obs, ebv_range,
         feh = truncnorm.ppf(np.clip(u[2], 1e-12, 1-1e-12), a_f, b_f, loc=mu_f, scale=sig_f)
     else:
         feh = FEH_MIN_ + u[2] * (FEH_MAX_ - FEH_MIN_)
+    if SAMPLE_COORD == "mass_age_weighted":
+        # u[0] through the giant-branch proposal instead of Salpeter. The
+        # likelihood adds ln S(m) - ln q(m) to compensate (mass_weight_log).
+        # Off the isochrone the mass is left as drawn; the likelihood rejects it.
+        #
+        # Bounded by the module's M_MIN/M_MAX, NOT by the M_MIN_/M_MAX_
+        # arguments: mass_weight_log rebuilds this q from the module values,
+        # and the weight is only right if both see the same q. The defaults
+        # are bound when core is imported, so a later `core.M_MAX = ...`
+        # would otherwise reach the likelihood and not the proposal.
+        try:
+            m = GiantBranchMassProposal(_max_mass(la, feh), M_MIN, M_MAX).ppf(u[0])
+        except ValueError:
+            pass
     # Distance
     # In "likelihood" mode the parallax is a datum, not a prior: the distance
     # prior stays as DISTANCE_PRIOR and the measurement enters the likelihood.
@@ -554,7 +730,15 @@ def loglike_phot_theta(theta, obs, bands):
             return -np.inf
         if not (M_MIN < m < M_MAX):
             return -np.inf
+        ll_prior = 0.0
+    elif SAMPLE_COORD == "mass_age_weighted":
+        # Same boundary as "mass_age" (the proposal's support ends at
+        # getMaxMass), plus the weight that undoes the proposal.
+        ll_prior = mass_weight_log(m, la, f)
+        if not np.isfinite(ll_prior):
+            return -np.inf
     else:
+        ll_prior = 0.0
         try:
             mmax = interp.getMaxMass(la, f)
         except Exception:
@@ -564,7 +748,7 @@ def loglike_phot_theta(theta, obs, bands):
 
     model = interp(m, la, f)
     dm = 5*np.log10(d) - 5
-    ll = 0.0
+    ll = ll_prior
     gaia_trip = {'Gaia_G_EDR3','Gaia_BP_EDR3','Gaia_RP_EDR3'}
     use_gaia_color_ext = gaia_trip.issubset(set(obs.keys()))
 

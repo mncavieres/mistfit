@@ -1,5 +1,133 @@
 # Changelog
 
+## 2026-09c — a weighted mass proposal for the giant branch
+
+### NEW — `SAMPLE_COORD=mass_age_weighted`
+
+A third sampling coordinate, adapted from `MassMapper` in the rvspecfit-based
+distance code. It samples (mass, logAge) exactly as `mass_age` does, but draws
+the mass from a proposal that crowds points against the isochrone's own maximum
+mass, then divides that proposal back out of the likelihood:
+
+    logL  +=  ln S(m) − ln q(m | logAge, [Fe/H])
+
+where S is the Salpeter density `mass_age` draws from and q is a broken power
+law with its edge at `getMaxMass(logAge, [Fe/H])`: flat, then rising as
+(1 − m/m_max)^−1.545 over the last 1.4% of the mass range, then flat again
+over the last 0.03%. The break points and slope are `MassMapper`'s,
+unchanged.
+
+**The model is identical to `mass_age`.** Same prior, same likelihood, same
+posterior, and — unlike `mass_eep` — the same evidence, so `lnZ` is directly
+comparable between the two. Only where the sampler puts its points changes.
+That makes this the way to resolve the giant branch *without* swapping the
+uniform age prior for a uniform evolutionary-stage prior, which is the trade
+`mass_eep` makes.
+
+What the proposal buys, in the setup behind the 12.8% figure in 2026-09b
+([Fe/H] ~ N(−1.2, 0.3), log age over 4–13 Gyr, 4000 prior draws each):
+
+| | on the grid | of those, `logg < 2` | draws at `logg < 2` | lowest `logg` |
+|---|---|---|---|---|
+| `mass_age` | 3821/4000 | 0.0% | 0 | 2.51 |
+| `mass_eep` | 223/4000 | 13.5% | 30 | 0.58 |
+| `mass_age_weighted` | **4000/4000** | 12.2% | **490** | **−0.24** |
+
+`mass_eep` reaches the upper giant branch as often per on-grid draw, but most of
+its draws fall off the grid; the weighted proposal puts 16× more draws there in
+absolute terms. Per isochrone, 25% of proposal draws land in the last 1.4% of
+the mass range, where the post-main-sequence sits (0.1% of Salpeter draws),
+and 9.6% in the last 0.03%, where the TP-AGB and post-AGB sit (0.002% of
+Salpeter draws, a factor of ~4000).
+
+Checks of the weighting itself: `q` is an exact inverse CDF (round trip to
+1e−14), its density integrates to one, and `q · exp(weight)` reproduces the
+Salpeter density to 1e−10 pointwise and its on-isochrone prior volume to 1e−8.
+A 400 000-draw Monte Carlo recovers the giant-branch tail's prior mass to
+within its 0.9% sampling error. Tests in `test/test_config.py` pin all of this.
+
+### Measured: a dwarf, and 51 K giants
+
+**DESI312** (a 1 M☉, 10 Gyr main-sequence/turn-off star; parallax in the
+likelihood, flat distance prior, nlive 2000). All three coordinates agree
+within 0.16σ. `mass_age` and `mass_age_weighted` give lnZ −17.945 and −17.940
+— the same model, as they must — and the weighted run used 13% fewer
+likelihood calls. `mass_eep` comes out about 2% further and 0.01–0.02 dex older
+in both of two seeds; reweighting its samples by the exact prior ratio (∝ dlogAge/dEEP,
+which minimint returns) lands on the uniform-age answer, so that shift is the
+EEP prior, not sampling.
+
+**K giants** (MagE 18, X-shooter 33; `PARALLAX_MODE=likelihood
+DISTANCE_PRIOR=flat`, 4–13 Gyr, nlive 5000, one seed; the analysis evaluates
+the model at each posterior sample):
+
+| | MagE med \|Δlog g\| | >3σ | Σ lnZ | calls | X-shooter med \|Δlog g\| | >3σ | Σ lnZ | calls |
+|---|---|---|---|---|---|---|---|---|
+| `mass_age` | 1.45σ | 2 | −385.0 | 48.2 M | 1.19σ | 5 | −831.0 | 91.4 M |
+| `mass_eep` | 1.13σ | 2 | −300.1 | 39.3 M | 1.08σ | 3 | −723.5 | 81.2 M |
+| `mass_age_weighted` | 1.22σ | **1** | −374.7 | **38.1 M** | **0.88σ** | **2** | −793.6 | **76.0 M** |
+
+Two different effects are mixed in that table, and they separate cleanly.
+
+*Sampling (`mass_age_weighted` against `mass_age` — same prior, same
+likelihood).* The weighted runs find 10.3 (MagE) and 37.4 (X-shooter) more nats
+of evidence, by more than 1 nat on 4/18 and 9/33 stars, up to 12.5;
+`mass_age` is ahead by more than 1 nat on 0/18 and 3/33, by at most 2.2.
+Since the model is the same, the extra evidence is posterior mass `mass_age`
+did not find, and it sits at the luminous end of the track: `mass_age`
+distances are a median 9% (MagE) and 2% (X-shooter) shorter, and up to 38%
+shorter for individual stars. Note that lnZ is a blunt instrument here —
+missing 60% of the posterior costs under 1 nat — so several MagE stars differ
+by 10–25% in distance at ΔlnZ ≈ 0.
+
+*Prior (`mass_eep` against `mass_age_weighted`).* Uniform-in-EEP does two
+things to the prior, not one.
+
+1. Inside its support it reweights phases by dEEP/dlogAge — by how fast the
+   star is changing, not by how long it stays there. Relative to uniform log
+   age, it weights the RGB at log g = 2.5 about 60× and at log g = 1.0 about
+   550× the main sequence, a factor 2.6 across log g = 2.2 ± 0.3. Where this is
+   the only difference, it is small on these data: on the 20 X-shooter stars
+   whose uniform-age posterior lies inside the EEP support, the distances agree
+   to a median 1.4% and none differs by 10%, and reweighting the `mass_eep`
+   samples by the prior ratio brings that to 0.1%.
+2. **Its support ends at `EEP_MAX = 808`, the start of the TP-AGB.** On 3/18
+   MagE and 6/33 X-shooter stars, 64–100% of the uniform-age posterior lies on
+   the TP-AGB or post-AGB (EEP 808–1424). `mass_eep` cannot represent those
+   solutions and puts these stars at the RGB tip or early AGB instead, 11–36%
+   nearer.
+   Raising `EEP_MAX` does not fix this: the TP-AGB spans EEP 808–1409, 601 EEPs
+   for about a million years of evolution, so a uniform-EEP prior would give it
+   more weight than the whole main sequence and RGB together (EEP 202–605).
+
+The summed lnZ gap between `mass_eep` and the uniform-age runs, +74.6 (MagE)
+and +70.1 (X-shooter) nats, about 4 per star, is the Bayes factor between the
+two priors — essentially the extra prior weight uniform-in-EEP gives the giant
+branch over the time spent there. It is not a measure of sampling quality.
+**This corrects how the 2026-09b result should be read:** of the "~85 nats in
+favour of `mass_eep`" on the MagE giants, 10.3 were `mass_age` failing to
+sample, and 74.6 are the change of prior.
+
+The TP-AGB and post-AGB solutions are short-lived — the uniform-age prior
+already charges them for it — and are still preferred, for stars whose
+spectroscopic log g lies between −0.5 and +0.5. Whether to allow them is a
+science decision, and should be made explicitly rather than inherited from
+`EEP_MAX`.
+
+Rerunning the 2026-09-15 MagE `mass_age` and `mass_eep` arrays unchanged, with
+the same seed, reproduced every lnZ and every likelihood-call count exactly
+(36 star fits).
+
+**One cost.** At log age ≲ 6.6 the isochrone reaches past `M_MAX = 100`, the
+proposal is truncated there and becomes close to uniform on [0.1, 100], so a
+young low-mass solution occupies a thinner sliver of the unit cube than under
+Salpeter. Irrelevant for old populations; worth knowing for young ones.
+
+The output table is unchanged: column 1 is a logAge throughout, in the
+checkpoint too, so nothing needs converting.
+
+---
+
 ## 2026-09b — the EEP sampling coordinate, and a warning that was never heard
 
 ### NEW — `SAMPLE_COORD`: sample in EEP instead of age
@@ -25,7 +153,8 @@ prediction at each posterior sample against the measurement:
 | `mass_eep` | **1.15σ** | 2/18 | **−300** |
 
 at otherwise identical priors and likelihood. A real but moderate improvement,
-plus ~85 nats of evidence. `mass_age` is not broken — it is a worse coordinate
+plus ~85 nats of evidence. *(2026-09c: most of those 85 nats are a Bayes factor
+between the two priors, not better sampling — see the measurements there.)* `mass_age` is not broken — it is a worse coordinate
 for evolved stars. **Prefer `mass_eep` for giants**; for dwarfs and subgiants
 there is little to choose between them.
 

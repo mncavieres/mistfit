@@ -244,6 +244,7 @@ def test_numpy_runtime_noise_is_still_suppressed():
 def test_mass_age_remains_the_default_coordinate():
     assert load().SAMPLE_COORD == "mass_age"
     assert load(SAMPLE_COORD="mass_eep").SAMPLE_COORD == "mass_eep"
+    assert load(SAMPLE_COORD="mass_age_weighted").SAMPLE_COORD == "mass_age_weighted"
 
 
 def test_second_coordinate_is_an_eep_only_under_mass_eep():
@@ -289,3 +290,103 @@ def test_on_grid_points_still_return_a_real_age():
     rgb = m.logage_from_eep(0.9, 600, -1.2)
     ms = m.logage_from_eep(0.9, 250, -1.2)
     assert m.LOGAGE_MIN <= ms < rgb <= m.LOGAGE_MAX, (ms, rgb)
+
+
+# ------------------------------------------------- weighted mass proposal
+@pytest.mark.parametrize("iso_maxmass,mmax", [
+    (0.865, 100.0),    # old metal-poor isochrone: the case the proposal is for
+    (19.8, 100.0),     # young, but still inside the mass prior
+    (300.0, 100.0),    # youngest: the isochrone runs past M_MAX -> truncated
+    (0.12, 100.0),     # barely above M_MIN: the break points collapse onto it
+])
+def test_giant_branch_proposal_is_a_normalised_inverse_cdf(iso_maxmass, mmax):
+    """pdf must be the density of ppf, or the weight ln S - ln q is wrong."""
+    m = load(SAMPLE_COORD="mass_age_weighted")
+    q = m.GiantBranchMassProposal(iso_maxmass, 0.1, mmax)
+    top = min(iso_maxmass, mmax)
+    u = np.linspace(0, 1, 1001)
+    x = np.array([q.ppf(v) for v in u])
+    assert x[0] == pytest.approx(0.1) and x[-1] == pytest.approx(top)
+    assert np.all(np.diff(x) >= 0)
+    assert max(abs(q.cdf(xx) - v) for xx, v in zip(x, u)) < 1e-9
+    # pdf is the derivative of cdf, away from the break points
+    for xx in np.linspace(0.1, top, 23)[1:-1]:
+        h = 1e-7 * top
+        if min(abs(xx - b) for b in (q.m1, q.m2)) < 10 * h:
+            continue
+        assert q.pdf(xx) == pytest.approx((q.cdf(xx + h) - q.cdf(xx - h)) / (2 * h), rel=1e-4)
+    assert q.pdf(0.1) == 0 and q.pdf(top) == 0 and q.pdf(top * 1.01) == 0
+
+
+def test_giant_branch_proposal_crowds_the_isochrone_tip():
+    """The point of it: far more draws near maxMass than Salpeter gives."""
+    m = load(SAMPLE_COORD="mass_age_weighted")
+    mx = 0.865
+    q = m.GiantBranchMassProposal(mx, m.M_MIN, m.M_MAX)
+    u = (np.arange(20000) + 0.5) / 20000
+    frac_q = np.mean([q.ppf(v) > q.m1 for v in u])
+    e = 1 - m.ALPHA_IMF
+    S = lambda x: (x**e - m.M_MIN**e) / (m.M_MAX**e - m.M_MIN**e)
+    frac_salpeter = S(mx) - S(q.m1)
+    assert frac_q > 0.2 and frac_salpeter < 0.002
+    assert frac_q / frac_salpeter > 100
+    # and ~10% in the last 0.03%, the TP-AGB / post-AGB: what lets the weighted
+    # runs find modes there that mass_age misses (CHANGELOG 2026-09c)
+    tip_q = 1.0 - q.c2
+    tip_salpeter = S(mx) - S(q.m2)
+    assert q.m2 == pytest.approx(mx * (1 - 10**-3.51))
+    assert tip_q > 0.09 and tip_q / tip_salpeter > 1000
+
+
+def test_weight_undoes_the_proposal_exactly():
+    """q(m) * exp(weight) must be the Salpeter density mass_age samples from,
+    normalisation included -- that is what makes lnZ comparable to mass_age."""
+    from scipy.integrate import quad
+
+    m = load(SAMPLE_COORD="mass_age_weighted")
+    m._max_mass = lambda la, feh: 0.865        # no grid needed
+    q = m.GiantBranchMassProposal(0.865, m.M_MIN, m.M_MAX)
+    e = 1 - m.ALPHA_IMF
+    for x in (0.15, 0.5, 0.86, 0.8649):
+        salpeter = e * x**-m.ALPHA_IMF / (m.M_MAX**e - m.M_MIN**e)
+        assert q.pdf(x) * np.exp(m.mass_weight_log(x, 10.0, -1.2)) == pytest.approx(salpeter, rel=1e-10)
+    # integrated, the weighted proposal carries exactly mass_age's on-isochrone prior volume
+    brk = [q.m1, q.m2]
+    got = quad(lambda x: q.pdf(x) * np.exp(m.mass_weight_log(x, 10.0, -1.2)),
+               m.M_MIN, 0.865, points=brk, limit=200)[0]
+    want = (0.865**e - m.M_MIN**e) / (m.M_MAX**e - m.M_MIN**e)
+    assert got == pytest.approx(want, rel=1e-8)
+
+
+def test_weight_rejects_what_mass_age_rejects():
+    m = load(SAMPLE_COORD="mass_age_weighted")
+    m._max_mass = lambda la, feh: 0.865
+    assert m.mass_weight_log(0.9, 10.0, -1.2) == -np.inf       # past the tip
+    assert m.mass_weight_log(0.1, 10.0, -1.2) == -np.inf       # at M_MIN
+    m._max_mass = lambda la, feh: float("nan")                 # off the grid
+    assert m.mass_weight_log(0.5, 10.0, -1.2) == -np.inf
+
+
+def test_weighted_ptform_draws_age_as_mass_age_and_mass_from_the_proposal():
+    u = np.array([0.9, 0.3, 0.5, 0.5, 0.5])
+    plain = load(SAMPLE_COORD="mass_age").ptform_u5(u, {}, (0.0, 0.5))
+    m = load(SAMPLE_COORD="mass_age_weighted")
+    m._max_mass = lambda la, feh: 0.865
+    weighted = m.ptform_u5(u, {}, (0.0, 0.5))
+    # every coordinate but the mass is untouched
+    assert np.allclose(weighted[1:], plain[1:])
+    assert weighted[0] == pytest.approx(
+        m.GiantBranchMassProposal(0.865, m.M_MIN, m.M_MAX).ppf(0.9))
+    assert m.M_MIN < weighted[0] < 0.865
+
+
+def test_proposal_and_weight_see_the_same_mass_bounds_after_an_override():
+    """ptform_u5's defaults are frozen at import; the weighted proposal must not
+    use them, or overriding core.M_MAX would change q in the likelihood only."""
+    m = load(SAMPLE_COORD="mass_age_weighted")
+    m._max_mass = lambda la, feh: 300.0        # a young isochrone past M_MAX
+    m.M_MAX = 50.0
+    u = np.array([0.999, 0.5, 0.5, 0.5, 0.5])
+    mass = m.ptform_u5(u, {}, (0.0, 0.5))[0]
+    assert mass <= 50.0
+    assert np.isfinite(m.mass_weight_log(mass * 0.999, 6.0, 0.0))
