@@ -19,7 +19,7 @@ change results even with every setting left at its default, so read
 | **`__version__`** | looked up a package name that no longer existed, so it was always `0+unknown`. |
 | **`PARALLAX_MODE`** | the parallax was discarded whenever measured ≤ 0 — which, for distant stars, is noise on a small positive number and a *selective* discard. Now used regardless of sign by default. |
 | **`DISTANCE_PRIOR`** | `loguniform` \| `flat` \| `volume`. The historical `loguniform` puts 70% of its prior mass inside 10 kpc. |
-| **`SAMPLE_COORD`** | `mass_age` \| `mass_eep`. Sampling in EEP rather than age reaches the giant branch, which spans 47.7% of a U(200, 808) EEP prior against 1.8% of a 4–13 Gyr age prior. |
+| **`SAMPLE_COORD`** | `mass_age` \| `mass_eep` \| `mass_age_weighted`. Sampling in EEP rather than age reaches the giant branch, which spans 47.7% of a U(200, 808) EEP prior against 1.8% of a 4–13 Gyr age prior. `mass_age_weighted` reaches it too while keeping `mass_age`'s prior and evidence (2026-09c). |
 
 Configuration is read from the environment, so a scheduler run can change one
 setting and nothing else:
@@ -56,23 +56,42 @@ distance on its own.
 **`SAMPLE_COORD` decides how well the sampler can resolve the giant branch.**
 Under the default `mass_age`, at a fixed old age the whole RGB lies in a narrow
 sliver of mass just below `getMaxMass(logAge, feh)`, and the likelihood cuts it
-off there. Under `mass_eep` that boundary disappears: the constraint is simply
-whether (mass, EEP, [Fe/H]) exists on the MIST grid.
+off there. Two ways round that:
+
+* `mass_eep` samples EEP instead of age, so the boundary disappears: the
+  constraint is simply whether (mass, EEP, [Fe/H]) exists on the MIST grid. The
+  price is the prior — uniform in evolutionary stage, not in age.
+* `mass_age_weighted` keeps (mass, logAge) and draws the mass from a proposal
+  crowded against `getMaxMass`, dividing it back out of the likelihood. Same
+  prior, posterior and `lnZ` as `mass_age`; only the sampling changes.
 
 | your sample | suggested | why |
 |---|---|---|
-| giants (RGB, AGB), or anything where `logg ≲ 2` | `SAMPLE_COORD=mass_eep` | the RGB spans 47.7% of the EEP prior against 1.8% of a 4–13 Gyr age prior; in 4000 prior draws, none reached `logg < 2` under `mass_age` against 12.8% under `mass_eep` |
-| dwarfs and subgiants | either | the main sequence is well resolved in both coordinates |
-| you want an interpretable age prior | `mass_age` | uniform-in-EEP is **not** uniform in age; an age prior and an evolutionary-stage prior cannot both be uniform |
+| giants (RGB, AGB), or anything where `logg ≲ 2` | `SAMPLE_COORD=mass_age_weighted` | reaches the giant branch and the isochrone's end with `mass_age`'s prior, so you know what the prior is; on 51 K giants it found 10 and 37 nats more summed evidence than `mass_age` (same model) on the two samples, had the fewest stars in >3σ tension with their spectroscopic `logg` (3, against 7 and 5), and used the fewest likelihood calls of the three |
+| giants, where you want MINESweeper's convention | `SAMPLE_COORD=mass_eep` | uniform in EEP; read the caveats below before comparing its distances or `lnZ` with the other two |
+| dwarfs and subgiants | any | the main sequence is well resolved in all three coordinates; on DESI312 they agree within 0.16σ |
+| reproducing an older run | `SAMPLE_COORD=mass_age` | the default, unchanged |
 
-On 18 distant K giants with spectroscopic `logg`, `mass_eep` agreed with the
-spectroscopy at a median 1.15σ against 1.47σ for `mass_age`, and gained ~85
-nats of summed evidence at otherwise identical settings. A real but moderate
-improvement: `mass_age` is not broken, it is a worse coordinate for giants.
+**What uniform-in-EEP does to the prior.** It is not a reparameterisation of
+`mass_age`; it is a different prior, in two ways:
 
-The output columns are identical either way — the EEP is converted back to
-logAge before anything is summarised. Only a raw dynesty **checkpoint** holds
-the EEP in column 1.
+* inside its support it weights each phase by how fast the star is changing
+  (dEEP/dlogAge), not by how long it stays there — the RGB at `logg = 1` gets
+  ~550× the main sequence's weight relative to a uniform age prior, and the
+  weight changes by a factor 2.6 across `logg = 2.2 ± 0.3`;
+* its support ends at `EEP_MAX = 808`, the start of the TP-AGB, so TP-AGB and
+  post-AGB solutions are excluded outright. On 9 of 51 K giants most of the
+  uniform-age posterior sat there, and `mass_eep` put those stars 11–36%
+  nearer. Raising `EEP_MAX` swaps one problem for another: the TP-AGB is 601
+  EEPs long.
+
+The ~85 nats by which `mass_eep` beat `mass_age` on 18 MagE giants are mostly a
+Bayes factor between those two priors (74.6 nats), not better sampling (10.3).
+Details in CHANGELOG 2026-09c.
+
+The output columns are identical in all three — the EEP is converted back to
+logAge before anything is summarised. Only a raw dynesty **checkpoint** under
+`mass_eep` holds the EEP in column 1.
 
 ### The trade-off between `prior` and `likelihood`
 
