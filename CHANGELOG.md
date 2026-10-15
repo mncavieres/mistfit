@@ -1,5 +1,98 @@
 # Changelog
 
+## 2026-09d — bounds reassigned after import now reach the prior
+
+### FIXED — `core.LOGAGE_MIN = …` after import did not move the age prior
+
+`ptform_u5` took its bounds as default arguments — `LOGAGE_MIN_=LOGAGE_MIN`
+and so on — and Python evaluates those once, when `mistfit.core` is imported.
+A script that sets the age window after import,
+
+```python
+import mistfit.core as core
+core.LOGAGE_MIN = 8.5
+core.LOGAGE_MAX = math.log10(14e9)
+```
+
+changed the module globals, which the likelihood reads, but not the prior
+transform. Under `SAMPLE_COORD=mass_eep` that was harmless: the likelihood
+rejects any derived logAge outside the module's window, so the window held.
+Under `mass_age`, the default, nothing but the prior enforces the window, so
+**the override was silently ignored** and logAge was still drawn from
+[5.0, 10.114].
+
+If you fitted under `mass_age` with an override like the one above, the fit
+used the default window. A common reason to raise `LOGAGE_MIN` is to shut out
+pre-main-sequence solutions, and those fits were still exposed to them: logAge
+samples below your `LOGAGE_MIN` are the sign. A posterior that sat well inside
+both windows is unchanged, but its `lnZ` was normalised to the default window's
+width: 1.13 nats lower than the [8.5, log10(14e9)] window gives.
+
+The same applied to every bound `ptform_u5` takes: `M_MIN`, `M_MAX`,
+`FEH_MIN`, `FEH_MAX`, `DIST_MIN`, `DIST_MAX` and `ALPHA_IMF`. Where the
+likelihood happens to check the same bound — `M_MIN` under both coordinates,
+`M_MAX` under `mass_eep` — a narrower value was still enforced, by rejection;
+a wider value, and every other override, was ignored.
+
+`fit_stars_with_minimint` had the same trap in its `ebv_range` default,
+`(EBV_MIN_DEFAULT, EBV_MAX_DEFAULT)`. A star with an `EBV` value gets ±5σ
+around it instead, clipped above by `EBV_MAX_DEFAULT` read at call time but
+below by a literal 0.0. So raising `EBV_MAX_DEFAULT` for a heavily reddened
+sample, as the comment on it in `core.py` suggests, widened the prior for stars
+with an `EBV` value
+and left stars without one at [0, 1.5], while `EBV_MIN_DEFAULT` moved only the
+stars without one.
+
+All of these now default to `None` and are read when called: the `ptform_u5`
+bounds from the module globals they are named after, and `ebv_range` from
+`EBV_MIN_DEFAULT` / `EBV_MAX_DEFAULT`, which also clip the per-star range at
+both ends. A value passed explicitly still wins, so existing callers are
+unaffected, and with nothing reassigned the prior is bit-identical to before —
+`ptform_u5` was checked on 80 000 draws across both coordinates, two distance
+priors and four combinations of [Fe/H] and parallax priors, and a test pins the
+default E(B−V) ranges.
+
+### NEW — `LOGAGE_MIN` / `LOGAGE_MAX` from the environment
+
+The age window is now a setting like `EEP_MIN` / `EEP_MAX`:
+
+```bash
+LOGAGE_MIN=8.5 LOGAGE_MAX=10.146 python run_nest.py
+```
+
+Defaults are unchanged: 5.0 and log10(13e9) = 10.114. An empty or inverted
+window is refused at import.
+
+Prefer this to reassigning `core.LOGAGE_MIN` in a script. The assignment now
+reaches the prior, but dynesty evaluates the prior and the likelihood in pool
+workers, and a worker started by `spawn` (the default on macOS) or `forkserver`
+(the default on Linux from Python 3.14) begins from a fresh import. It sees an
+assignment at the top level of your script, which it re-runs, but **not one
+made inside `main()` or under `if __name__ == "__main__":`** — that one reaches
+neither the prior nor the likelihood, under any coordinate. Only a forked
+worker inherits it. The environment the job starts with reaches every worker
+however it is started. This holds for any module-level setting you reassign,
+not only the age window.
+
+### DOCS — the README disagreed with the code
+
+Corrected where it could mislead a fit:
+
+* an `EBV` value with no usable error is given **0.1** mag, not 0.3 — the code
+  has always used 0.1;
+* the mass prior runs to 100 M☉, not 5, and the distance prior starts at 10 pc,
+  not 1 kpc;
+* an `*_ERR_FLOOR` applies *after* the additive term, `max(err + additive,
+  floor)`, not instead of it;
+* `lnZ` is comparable only between fits with the same likelihood. The README
+  said spec+phot and phot-only fits of a star could be compared; they cannot,
+  and neither can `PARALLAX_MODE=likelihood` against the other modes.
+
+Also listed what was missing: the `fit_mode` output column, the `_error`
+suffix, the VISTA coefficients and the `tqdm` dependency.
+
+---
+
 ## 2026-09c — a weighted mass proposal for the giant branch
 
 ### NEW — `SAMPLE_COORD=mass_age_weighted`

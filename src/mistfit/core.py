@@ -56,7 +56,7 @@ warnings.simplefilter("always", MistfitWarning)
 
 # Physical / prior bounds
 M_MIN, M_MAX = 0.1, 100.0                 # Msun
-LOGAGE_MIN, LOGAGE_MAX = 5.0, 10.113943352306837  # yr, no need to go beyond the hubble time
+# LOGAGE_MIN, LOGAGE_MAX: settable from the environment, see "the age window"
 FEH_MIN, FEH_MAX = -2.9, 0.9 # limits of MIST
 DIST_MIN, DIST_MAX = 10.0, 2.0e5         # pc
 EBV_MIN_DEFAULT, EBV_MAX_DEFAULT = 0.0, 1.5 # you might need to extend this for very reddened stars
@@ -333,6 +333,26 @@ if SAMPLE_COORD not in ("mass_age", "mass_eep", "mass_age_weighted"):
 EEP_MIN = _env_float("EEP_MIN", 200.0)
 EEP_MAX = _env_float("EEP_MAX", 808.0)
 
+# --- the age window ----------------------------------------------------------
+# log10(age/yr). Under "mass_age" ptform_u5 draws logAge uniformly from it;
+# under "mass_eep" logAge is derived from the EEP and the likelihood rejects any
+# point outside it. Either way it is a hard edge on the posterior. The default
+# upper edge is 13 Gyr: no need to go beyond the Hubble time.
+#
+# Prefer setting it from the environment to assigning core.LOGAGE_MIN in a
+# script. An assignment now reaches the prior as well as the likelihood (see
+# ptform_u5), but dynesty evaluates both in pool workers, and a worker started
+# by "spawn" (the default on macOS) or "forkserver" (the default on Linux from
+# Python 3.14) begins from a fresh import: it sees an assignment made at the
+# top level of the script, which it re-runs, and not one made under
+# `if __name__ == "__main__":`. The environment the job starts with reaches
+# every worker, however it is started.
+LOGAGE_MIN = _env_float("LOGAGE_MIN", 5.0)
+LOGAGE_MAX = _env_float("LOGAGE_MAX", 10.113943352306837)   # log10(13e9)
+if LOGAGE_MIN is None or LOGAGE_MAX is None or not LOGAGE_MIN < LOGAGE_MAX:
+    raise ValueError(
+        f"LOGAGE_MIN must be below LOGAGE_MAX, got {LOGAGE_MIN!r} and {LOGAGE_MAX!r}")
+
 # One TheoryInterpolator per process, for the EEP -> logAge map. A list rather
 # than a module global assigned at import, so it is created lazily in each
 # worker and never pickled.
@@ -353,9 +373,10 @@ def logage_from_eep(mass, eep, feh):
     the end of the track, an [Fe/H] outside the grid and a mass below it all
     come back as exactly 0.0. That is a trap: 0.0 is finite, so an
     `np.isfinite` guard passes it straight through, and logAge = 0 means an
-    age of one year. Since MIST never produces a logAge below LOGAGE_MIN = 5,
-    any non-positive return is unambiguously the sentinel, and translating it
-    to NaN here means every caller can use one honest finiteness check.
+    age of one year. No real MIST age is anywhere near that -- the youngest on
+    the grid, at EEP 1, are ~10^1.7 yr -- so any non-positive return is
+    unambiguously the sentinel, and translating it to NaN here means every
+    caller can use one honest finiteness check.
     """
     try:
         value = _theory().getLogAgeFromEEP(mass, eep, feh)
@@ -651,17 +672,34 @@ def _ensure_dir(path):
 
 # top level functions pickable for multiprocessing
 def ptform_u5(u, obs, ebv_range,
-              M_MIN_=M_MIN, M_MAX_=M_MAX,
-              LOGAGE_MIN_=LOGAGE_MIN, LOGAGE_MAX_=LOGAGE_MAX,
-              FEH_MIN_=FEH_MIN, FEH_MAX_=FEH_MAX,
-              DIST_MIN_=DIST_MIN, DIST_MAX_=DIST_MAX,
-              ALPHA_IMF_=ALPHA_IMF):
+              M_MIN_=None, M_MAX_=None,
+              LOGAGE_MIN_=None, LOGAGE_MAX_=None,
+              FEH_MIN_=None, FEH_MAX_=None,
+              DIST_MIN_=None, DIST_MAX_=None,
+              ALPHA_IMF_=None):
     """u~U(0,1)^5 -> (M, logAge|EEP, [Fe/H], distance_pc, E(B-V)).
 
     The second element is an EEP under SAMPLE_COORD="mass_eep"; the likelihood
     turns it into a logAge, and fit_stars_with_minimint converts the posterior
     column back before anything is summarised.
+
+    A bound left as None is read, when the function is called, from the module
+    global it is named after (M_MIN_ from M_MIN, and so on). The bounds used
+    to be default arguments, which Python evaluates once, at import, so
+    `core.LOGAGE_MIN = 8.5` after import reached the likelihood's age check
+    under "mass_eep" but never the prior -- and under "mass_age", where the
+    prior is all that enforces the window, logAge was still drawn from
+    [5, 10.11]. A bound passed explicitly still wins, for that call.
     """
+    M_MIN_ = M_MIN if M_MIN_ is None else M_MIN_
+    M_MAX_ = M_MAX if M_MAX_ is None else M_MAX_
+    LOGAGE_MIN_ = LOGAGE_MIN if LOGAGE_MIN_ is None else LOGAGE_MIN_
+    LOGAGE_MAX_ = LOGAGE_MAX if LOGAGE_MAX_ is None else LOGAGE_MAX_
+    FEH_MIN_ = FEH_MIN if FEH_MIN_ is None else FEH_MIN_
+    FEH_MAX_ = FEH_MAX if FEH_MAX_ is None else FEH_MAX_
+    DIST_MIN_ = DIST_MIN if DIST_MIN_ is None else DIST_MIN_
+    DIST_MAX_ = DIST_MAX if DIST_MAX_ is None else DIST_MAX_
+    ALPHA_IMF_ = ALPHA_IMF if ALPHA_IMF_ is None else ALPHA_IMF_
     # Mass ~ Salpeter
     exp = 1.0 - ALPHA_IMF_
     m = (u[0] * (M_MAX_**exp - M_MIN_**exp) + M_MIN_**exp) ** (1.0 / exp)
@@ -686,11 +724,11 @@ def ptform_u5(u, obs, ebv_range,
         # likelihood adds ln S(m) - ln q(m) to compensate (mass_weight_log).
         # Off the isochrone the mass is left as drawn; the likelihood rejects it.
         #
-        # Bounded by the module's M_MIN/M_MAX, NOT by the M_MIN_/M_MAX_
-        # arguments: mass_weight_log rebuilds this q from the module values,
-        # and the weight is only right if both see the same q. The defaults
-        # are bound when core is imported, so a later `core.M_MAX = ...`
-        # would otherwise reach the likelihood and not the proposal.
+        # Bounded by the module's M_MIN/M_MAX, NOT by M_MIN_/M_MAX_:
+        # mass_weight_log rebuilds this q in the likelihood from the module
+        # values, and the weight is only right if both see the same q. A bound
+        # passed to ptform_u5 explicitly would reach the proposal but not the
+        # likelihood, so for this coordinate the module values are the bounds.
         try:
             m = GiantBranchMassProposal(_max_mass(la, feh), M_MIN, M_MAX).ppf(u[0])
         except ValueError:
@@ -819,10 +857,15 @@ def fit_stars_with_minimint(
     processes: int = 4,
     debug: bool = False,
     random_seed: int = 42,
-    ebv_range: tuple[float, float] = (EBV_MIN_DEFAULT, EBV_MAX_DEFAULT),
+    ebv_range: tuple[float, float] | None = None,
 ) -> Table:
     """
     Run dynesty (internal pool) per star and append posterior summaries to the input table.
+
+    ebv_range is the uniform E(B-V) prior for a star with no EBV measurement;
+    None means (EBV_MIN_DEFAULT, EBV_MAX_DEFAULT). A star with a measurement
+    gets +-5 sigma around it instead, clipped to (EBV_MIN_DEFAULT,
+    EBV_MAX_DEFAULT) whatever ebv_range is.
 
     Columns appended:
       mass_p16/p50/p84, mass_multimodal
@@ -830,8 +873,15 @@ def fit_stars_with_minimint(
       feh_p16/p50/p84, feh_multimodal
       dist_pc_p16/p50/p84, dist_multimodal
       ebv_p16/p50/p84, ebv_multimodal
-      lnZ, lnZ_err
+      lnZ, lnZ_err, fit_mode
     """
+    # Read when called rather than bound at import as a default argument, so
+    # that reassigning core.EBV_MIN_DEFAULT / EBV_MAX_DEFAULT after import moves
+    # this range together with the per-star ranges below, which read them too.
+    # See ptform_u5 for the same trap.
+    if ebv_range is None:
+        ebv_range = (EBV_MIN_DEFAULT, EBV_MAX_DEFAULT)
+
     # One Generator per star, not one per table. The old code created a single
     # Generator here and passed it to every star in turn, so the stream a star
     # received depended on how many draws the stars before it had consumed:
@@ -881,9 +931,10 @@ def fit_stars_with_minimint(
 
         obs = _build_observed_from_row(row, bands)
 
-        # EBV range per star (if prior provided)
+        # EBV range per star (if prior provided). The lower clip was a literal
+        # 0.0, so EBV_MIN_DEFAULT moved stars without a measurement only.
         if 'ebv' in obs and obs['ebv'][1] > 0:
-            ebv_min = max(0.0, obs['ebv'][0] - 5*obs['ebv'][1])
+            ebv_min = max(EBV_MIN_DEFAULT, obs['ebv'][0] - 5*obs['ebv'][1])
             ebv_max = min(EBV_MAX_DEFAULT, obs['ebv'][0] + 5*obs['ebv'][1])
             ebv_range_row = (ebv_min, max(ebv_min + 1e-3, ebv_max))
         else:

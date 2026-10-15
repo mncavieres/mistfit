@@ -19,7 +19,7 @@ CONFIG_VARS = (
     "TEFF_ERR_ADDITIVE", "LOGG_ERR_ADDITIVE", "FEH_ERR_ADDITIVE",
     "PHOT_ERR_ADDITIVE", "TEFF_ERR_FLOOR", "LOGG_ERR_FLOOR",
     "FEH_ERR_FLOOR", "PHOT_ERR_FLOOR",
-    "SAMPLE_COORD", "EEP_MIN", "EEP_MAX",
+    "SAMPLE_COORD", "EEP_MIN", "EEP_MAX", "LOGAGE_MIN", "LOGAGE_MAX",
 )
 
 
@@ -163,6 +163,105 @@ def test_parallax_enters_prior_or_likelihood_but_never_both():
     assert d_lik == pytest.approx(
         m._draw_distance(0.5, m.DIST_MIN, m.DIST_MAX), rel=1e-9)
     assert d_lik != pytest.approx(d_prior, rel=1e-6)
+
+
+# ---------------------------------------------------------------- prior bounds
+def test_an_age_window_set_after_import_reaches_the_prior():
+    """The override scripts use must move the prior, not only the likelihood.
+
+    ptform_u5's bounds were default arguments, evaluated once at import, so
+    under mass_age -- where nothing but the prior enforces the window --
+    `core.LOGAGE_MIN = 8.5` was silently ignored and logAge was still drawn
+    from [5, 10.11].
+    """
+    m = load(SAMPLE_COORD="mass_age")
+    m.LOGAGE_MIN = 8.5
+    m.LOGAGE_MAX = float(np.log10(14e9))
+    assert m.ptform_u5(np.zeros(5), {}, (0, 0.5))[1] >= 8.5
+    assert m.ptform_u5(np.ones(5), {}, (0, 0.5))[1] == pytest.approx(np.log10(14e9))
+
+
+@pytest.mark.parametrize("name,value,u,index", [
+    ("M_MIN", 0.5, 0.0, 0), ("M_MAX", 50.0, 1.0, 0),
+    ("FEH_MIN", -2.0, 0.0, 2), ("FEH_MAX", 0.5, 1.0, 2),
+    ("DIST_MIN", 1.0e3, 0.0, 3), ("DIST_MAX", 1.0e5, 1.0, 3),
+])
+def test_every_other_bound_set_after_import_reaches_the_prior(name, value, u, index):
+    """At a corner of the unit cube each coordinate sits on its bound."""
+    m = load()
+    setattr(m, name, value)
+    assert m.ptform_u5(np.full(5, u), {}, (0.0, 0.5))[index] == pytest.approx(value, rel=1e-9)
+
+
+def test_imf_slope_set_after_import_reaches_the_prior():
+    m = load()
+    salpeter = m.ptform_u5(np.full(5, 0.5), {}, (0.0, 0.5))[0]
+    m.ALPHA_IMF = 1.35
+    assert m.ptform_u5(np.full(5, 0.5), {}, (0.0, 0.5))[0] > salpeter  # flatter, heavier
+
+
+def test_a_bound_passed_explicitly_still_wins():
+    m = load()
+    m.LOGAGE_MIN = 8.5
+    assert m.ptform_u5(np.zeros(5), {}, (0.0, 0.5), LOGAGE_MIN_=6.0)[1] == 6.0
+
+
+def test_age_window_is_configurable_from_the_environment():
+    m = load()
+    assert (m.LOGAGE_MIN, m.LOGAGE_MAX) == (5.0, 10.113943352306837)
+    m = load(LOGAGE_MIN=8.5, LOGAGE_MAX=10.15)
+    assert (m.LOGAGE_MIN, m.LOGAGE_MAX) == (8.5, 10.15)
+    assert m.ptform_u5(np.zeros(5), {}, (0.0, 0.5))[1] == 8.5
+
+
+@pytest.mark.parametrize("lo,hi", [(10.0, 9.0), (9.0, 9.0), ("none", 10.0)])
+def test_an_empty_age_window_is_refused(lo, hi):
+    with pytest.raises(ValueError, match="LOGAGE_MIN"):
+        load(LOGAGE_MIN=lo, LOGAGE_MAX=hi)
+
+
+def test_ebv_bounds_set_after_import_reach_every_star(tmp_path):
+    """fit_stars_with_minimint's ebv_range default was frozen at import as
+    well, while stars with an EBV measurement were clipped to the live
+    EBV_MAX_DEFAULT and a literal 0.0: reassigning the bounds moved one kind of
+    star and not the other. Checked without sampling -- the pool and sampler
+    are stubs that record the E(B-V) range each star is handed."""
+    from astropy.table import Table
+
+    m = load()
+    ranges = []
+
+    class NoPool:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class RecordingSampler:
+        def __init__(self, loglike, ptform, ndim, ptform_args=(), **kwargs):
+            ranges.append(tuple(ptform_args[1]))
+        def run_nested(self, **kwargs): pass
+        class results:
+            @staticmethod
+            def samples_equal():
+                return np.empty((0, 5))    # the fit skips the star's summaries
+
+    m.Pool, m.DynamicNestedSampler = NoPool, RecordingSampler
+    cols = {"source_id": [1, 2], "EBV": [np.nan, 0.1], "EBV_ERR": [np.nan, 0.1]}
+    for b in ("DECam_g", "DECam_r", "DECam_i"):
+        cols[b], cols[b + "_ERR"] = [15.0, 15.0], [0.01, 0.01]
+    table = Table(cols)            # star 1 has no EBV, star 2 has 0.1 +- 0.1
+
+    def fit(**kwargs):
+        ranges.clear()
+        m.fit_stars_with_minimint(table.copy(), str(tmp_path), **kwargs)
+        return ranges
+
+    no_ebv, with_ebv = fit()                                # defaults unchanged
+    assert no_ebv == (0.0, 1.5) and with_ebv == pytest.approx((0.0, 0.6))
+    m.EBV_MIN_DEFAULT, m.EBV_MAX_DEFAULT = 0.05, 3.0
+    no_ebv, with_ebv = fit()
+    assert no_ebv == (0.05, 3.0) and with_ebv == pytest.approx((0.05, 0.6))
+    assert fit(ebv_range=(0.0, 0.8))[0] == (0.0, 0.8)       # explicit still wins
 
 
 # ---------------------------------------------------------------- error budget
@@ -381,8 +480,8 @@ def test_weighted_ptform_draws_age_as_mass_age_and_mass_from_the_proposal():
 
 
 def test_proposal_and_weight_see_the_same_mass_bounds_after_an_override():
-    """ptform_u5's defaults are frozen at import; the weighted proposal must not
-    use them, or overriding core.M_MAX would change q in the likelihood only."""
+    """After `core.M_MAX = ...` the proposal (ptform_u5) and the weight
+    (mass_weight_log) must still build the same q, or the weights are wrong."""
     m = load(SAMPLE_COORD="mass_age_weighted")
     m._max_mass = lambda la, feh: 300.0        # a young isochrone past M_MAX
     m.M_MAX = 50.0
