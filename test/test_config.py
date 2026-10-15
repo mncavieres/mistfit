@@ -3,8 +3,9 @@
 Each test corresponds to a claim in CHANGELOG.md, so a regression shows up as a
 failing assertion rather than as a quietly different number months later.
 
-Nothing here touches the sampler or the isochrone grids: these exercise
-configuration handling and pure-python helpers, and run in seconds.
+Nothing here touches the sampler: these exercise configuration handling and
+pure-python helpers, and run in seconds. Two tests read minimint's MIST grid
+and are skipped where it is not installed -- CI does not download it.
 """
 import importlib
 import os
@@ -21,6 +22,23 @@ CONFIG_VARS = (
     "FEH_ERR_FLOOR", "PHOT_ERR_FLOOR",
     "SAMPLE_COORD", "EEP_MIN", "EEP_MAX", "LOGAGE_MIN", "LOGAGE_MAX",
 )
+
+
+def _mist_grid_installed():
+    """Whether minimint can load its MIST grid (minimint.download_and_prepare)."""
+    try:
+        import minimint
+        minimint.TheoryInterpolator()
+    except Exception:
+        return False
+    return True
+
+
+# Without the grid, logage_from_eep returns NaN for every input -- so an
+# on-grid check fails and an off-grid check passes without testing anything.
+needs_mist_grid = pytest.mark.skipif(
+    not _mist_grid_installed(),
+    reason="needs minimint's MIST grid (minimint.download_and_prepare); CI does not download it")
 
 
 def load(**env):
@@ -367,6 +385,7 @@ def test_eep_bounds_are_configurable():
     assert 300.0 <= eep <= 400.0
 
 
+@needs_mist_grid
 @pytest.mark.parametrize("mass,eep,feh", [
     (0.9, 2000, -1.2),     # EEP past the end of the track
     (0.9, 600, -5.0),      # [Fe/H] off the grid
@@ -384,6 +403,7 @@ def test_off_grid_points_map_to_nan_not_to_zero(mass, eep, feh):
     assert np.isnan(m.logage_from_eep(mass, eep, feh))
 
 
+@needs_mist_grid
 def test_on_grid_points_still_return_a_real_age():
     m = load(SAMPLE_COORD="mass_eep")
     rgb = m.logage_from_eep(0.9, 600, -1.2)
