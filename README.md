@@ -496,32 +496,27 @@ PARALLAX_MODE=prior DISTANCE_PRIOR=volume LOGG_ERR_FLOOR=0.3 python run_nest.py
 
 ## Citing mistfit
 
-If you use `mistfit` in published work, please cite the paper it was developed
-for:
+If you use `mistfit` in published work, please cite:
 
-> Cavieres, M., Chanamé, J., Navarrete, C., et al. 2025,
-> *The Distant Milky Way Halo from the Southern Hemisphere: Characterization of
-> the LMC-induced Dynamical Friction Wake*, ApJ, 983, 83.
-> [doi:10.3847/1538-4357/adbf08](https://doi.org/10.3847/1538-4357/adbf08) ·
-> [arXiv:2410.00114](https://arxiv.org/abs/2410.00114) ·
-> [ADS](https://ui.adsabs.harvard.edu/abs/2025ApJ...983...83C)
+> Cavieres, M., Koposov, S. E., Rossi, E. M., Penoyre, Z., & Verberne, S. 2026,
+> *Discovery of Galactic-centre-ejected star in DESI DR1*, A&A, 709, A117.
+> [ADS](https://ui.adsabs.harvard.edu/abs/2026A%26A...709A.117C/abstract) ·
+> [doi:10.1051/0004-6361/202659104](https://doi.org/10.1051/0004-6361/202659104) ·
+> [arXiv:2601.19866](https://arxiv.org/abs/2601.19866)
 
 ```bibtex
-@ARTICLE{Cavieres2025,
-       author = {{Cavieres}, Manuel and {Chanam{\'e}}, Julio and {Navarrete}, Camila and
-                 {Ordenes-Brice{\~n}o}, Yasna and {Garavito-Camargo}, Nicol{\'a}s and
-                 {Besla}, Gurtina and {Hempel}, Maren and {Vivas}, A. Katherina and
-                 {G{\'o}mez}, Facundo A.},
-        title = "{The Distant Milky Way Halo from the Southern Hemisphere: Characterization of the LMC-induced Dynamical Friction Wake}",
-      journal = {\apj},
-         year = 2025,
-       volume = {983},
-       number = {1},
-          eid = {83},
-          doi = {10.3847/1538-4357/adbf08},
-       eprint = {2410.00114},
+@ARTICLE{Cavieres2026,
+       author = {{Cavieres}, Manuel and {Koposov}, Sergey E. and {Rossi}, Elena Maria and
+                 {Penoyre}, Zephyr and {Verberne}, Sill},
+        title = "{Discovery of Galactic-centre-ejected star in DESI DR1}",
+      journal = {\aap},
+         year = 2026,
+       volume = {709},
+          eid = {A117},
+          doi = {10.1051/0004-6361/202659104},
+       eprint = {2601.19866},
 archivePrefix = {arXiv},
-       adsurl = {https://ui.adsabs.harvard.edu/abs/2025ApJ...983...83C}
+       adsurl = {https://ui.adsabs.harvard.edu/abs/2026A%26A...709A.117C}
 }
 ```
 
