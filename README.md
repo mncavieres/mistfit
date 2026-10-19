@@ -1,41 +1,282 @@
-# Nested Sampling MIST fitter
+# mistfit
 
-Nested-sampling stellar-parameter fits using **dynesty** + **minimint** (MIST isochrones with extinction).
+Bayesian stellar parameters and distances from photometry, by fitting
+[MIST](https://waps.cfa.harvard.edu/MIST/) isochrones with the
+[`minimint`](https://github.com/segasai/minimint) interpolator and the
+[`dynesty`](https://github.com/joshspeagle/dynesty) nested sampler.
 
-This package provides a single public function, `fit_stars_with_minimint`, which takes an `astropy.table.Table` containing photometry (and optionally spectroscopy, parallax, and reddening priors), and returns the same table with posterior summaries appended. A simple CLI is also included.
+Give it an `astropy` table of stars — at least three photometric bands with
+uncertainties, plus whatever else you have (Gaia parallax, E(B−V),
+spectroscopic Teff / logg / [Fe/H]) — and it returns the same table with
+posterior percentiles for **mass, age, [Fe/H], distance and E(B−V)**, the
+Bayesian evidence, and multimodality flags for every star.
 
----
-## What changed in 2026-09
-
-Four bugs fixed and two modelling choices exposed as settings. Two of the fixes
-change results even with every setting left at its default, so read
-[CHANGELOG.md](CHANGELOG.md) before rerunning anything you have published.
-
-| | |
-|---|---|
-| **band ordering** | the band list was built by iterating a `set`, so the order of the terms summed into the log-likelihood followed `PYTHONHASHSEED`. Two runs of the same stars on the same data gave distances differing by factors of up to 4.6. |
-| **silent band drops** | 23 of 58 "supported" bands have no extinction coefficient and were accepted, reported as used, then ignored by the likelihood. Every Pan-STARRS band was among them. |
-| **shared random stream** | one `Generator` per table, handed to each star in turn, so results depended on row order and on how the run was split across jobs. |
-| **`__version__`** | looked up a package name that no longer existed, so it was always `0+unknown`. |
-| **`PARALLAX_MODE`** | the parallax was discarded whenever measured ≤ 0 — which, for distant stars, is noise on a small positive number and a *selective* discard. Now used regardless of sign by default. |
-| **`DISTANCE_PRIOR`** | `loguniform` \| `flat` \| `volume`. The historical `loguniform` puts 70% of its prior mass inside 10 kpc. |
-| **`SAMPLE_COORD`** | `mass_age` \| `mass_eep` \| `mass_age_weighted`. Sampling in EEP rather than age reaches the giant branch, which spans 47.7% of a U(200, 808) EEP prior against 1.8% of a 4–13 Gyr age prior. `mass_age_weighted` reaches it too while keeping `mass_age`'s prior and evidence (2026-09c). |
-
-Configuration is read from the environment, so a scheduler run can change one
-setting and nothing else:
-
-```bash
-PARALLAX_MODE=prior DISTANCE_PRIOR=volume LOGG_ERR_FLOOR=0.3 python run_nest.py
+```
+5 free parameters per star:  mass · log10(age) · [Fe/H] · distance · E(B−V)
+likelihood:                  photometry (reddened, at distance) + Teff/logg (optional)
+                             + parallax (optional, see PARALLAX_MODE)
 ```
 
-## Choosing settings for your science case
+---
+
+## Installation
+
+```bash
+pip install mistfit
+```
+
+Python ≥ 3.9. This pulls in `numpy`, `scipy`, `astropy`, `matplotlib`,
+`tqdm`, `dynesty` and `minimint`. For corner plots in debug mode, also
+`pip install "mistfit[plot]"`.
+
+### One-time step: download the MIST grid
+
+`minimint` needs the MIST isochrones and bolometric-correction tables on disk,
+and `pip` does not fetch them. Do this once (it downloads a few GB and takes a
+while):
+
+```python
+import minimint
+minimint.download_and_prepare()   # default filter systems: Gaia, 2MASS, Bessell, DECam, SDSS, SkyMapper, WISE, ...
+```
+
+Only the filter systems you prepare can be fitted. The VISTA bands are not in
+the default list; if you have VHS / VIKING / VVV photometry, add them:
+
+```python
+minimint.download_and_prepare(filters=["UBVRIplus", "DECam", "SDSSugriz",
+                                       "SkyMapper", "WISE", "VISTA"])
+```
+
+Set `MINIMINT_DATA_PATH` to choose where the grid lives (useful on a cluster,
+where it can be prepared once and shared).
+
+---
+
+## Quick start
+
+### Minimal working example
+
+Two stars with synthetic photometry generated from MIST itself, so you know
+the right answer: a main-sequence dwarf at **1.5 kpc** with Gaia + 2MASS and a
+good parallax, and a metal-poor red giant at **20 kpc** whose parallax is
+pure noise but which has a spectrum.
+
+```python
+# mwe.py
+import numpy as np
+from astropy.table import Table
+from mistfit import fit_stars_with_minimint
+
+if __name__ == "__main__":   # required: the fit runs in a multiprocessing pool
+    tab = Table({
+        "source_id":    [1, 2],
+        "Gaia_G_EDR3":  [15.371, 14.787], "Gaia_G_EDR3_ERR":  [0.003, 0.003],
+        "Gaia_BP_EDR3": [15.673, 15.478], "Gaia_BP_EDR3_ERR": [0.005, 0.005],
+        "Gaia_RP_EDR3": [14.916, 13.983], "Gaia_RP_EDR3_ERR": [0.005, 0.005],
+        "2MASS_J":      [14.402, 12.893], "2MASS_J_ERR":      [0.03, 0.02],
+        "2MASS_H":      [14.076, 12.111], "2MASS_H_ERR":      [0.04, 0.02],
+        "2MASS_Ks":     [14.032, 11.991], "2MASS_Ks_ERR":     [0.05, 0.02],
+        "PARALLAX":     [0.66, 0.03],     "PARALLAX_ERR":     [0.02, 0.05],   # mas
+        "EBV":          [0.05, 0.03],     "EBV_ERR":          [0.01, 0.01],   # e.g. from a dust map
+        # spectroscopy for star 2 only; NaN means "not measured"
+        "Teff": [np.nan, 4190.0], "Teff_ERR": [np.nan, 100.0],
+        "logg": [np.nan, 1.1],    "logg_ERR": [np.nan, 0.2],
+        "FEH":  [np.nan, -1.0],   "FEH_ERR":  [np.nan, 0.1],
+    })
+
+    out = fit_stars_with_minimint(tab, output_path="mistfit_out",
+                                  nlive=500, dlogz=0.5, processes=4)
+
+    out["source_id", "fit_mode", "dist_pc_p16", "dist_pc_p50", "dist_pc_p84",
+        "feh_p50", "ebv_p50"].pprint()
+```
+
+Run it with the giant-friendly sampling coordinate (see
+[Configuration](#configuration)):
+
+```bash
+SAMPLE_COORD=mass_age_weighted python mwe.py
+```
+
+It takes a few minutes on a laptop and prints something like
+
+```
+source_id fit_mode dist_pc_p16 dist_pc_p50 dist_pc_p84 feh_p50 ebv_p50
+--------- -------- ----------- ----------- ----------- ------- -------
+        1     phot      1455.2      1495.8      1544.6  -0.173   0.045
+        2     spec     18726.5     21210.6     25462.5  -0.856   0.075
+```
+
+Both distances recover the truth (1500 pc and 20 000 pc). The dwarf's age and
+[Fe/H] are left essentially unconstrained: broadband photometry alone cannot
+pin them on the main sequence. Exact numbers vary slightly between machines
+and package versions. `nlive=500, dlogz=0.5` is for a quick demonstration;
+use the defaults (`nlive=3000, dlogz=0.01`) or more for science.
+
+> **The `if __name__ == "__main__":` guard is not optional.** The fit uses a
+> `multiprocessing.Pool`, and on macOS (and Windows) worker processes re-import
+> your script. Without the guard every worker starts its own fit and the run
+> hangs with no output and ~0% CPU.
+
+> **Why the E(B−V) and [Fe/H] priors?** Without them, the giant above comes out
+> at ~10 kpc with E(B−V) ≈ 0.24: reddening, metallicity and distance are
+> partly degenerate in broadband colours. Supply any prior you have.
+
+### A real catalogue
+
+```python
+from astropy.table import Table
+from mistfit import fit_stars_with_minimint
+
+if __name__ == "__main__":
+    tab = Table.read("my_stars.fits")
+
+    # rename your columns to minimint band names (see "Input table format")
+    for old, new in {"phot_g_mean_mag": "Gaia_G_EDR3",
+                     "phot_bp_mean_mag": "Gaia_BP_EDR3",
+                     "phot_rp_mean_mag": "Gaia_RP_EDR3",
+                     "parallax": "PARALLAX", "parallax_error": "PARALLAX_ERR"}.items():
+        if old in tab.colnames:
+            tab.rename_column(old, new)
+    # ...and provide an error column for every band, e.g. Gaia_G_EDR3_ERR
+
+    out = fit_stars_with_minimint(tab, output_path="fits/", processes=8)
+    # results are also written to fits/fit_results.fits
+```
+
+### Command line
+
+The same fit, from a file, with no Python:
+
+```bash
+mistfit my_stars.fits --outdir fits/ --nlive 3000 --dlogz 0.01 --procs 8
+```
+
+Any table format `astropy` can read works (FITS, ECSV, …). The output is
+`fits/fit_results.fits` (or `.ecsv` if the column types cannot be written to
+FITS). Add `--debug` for per-star diagnostic plots. Settings from
+[Configuration](#configuration) go in the environment:
+
+```bash
+SAMPLE_COORD=mass_age_weighted PARALLAX_MODE=likelihood DISTANCE_PRIOR=flat \
+  mistfit my_stars.fits --outdir fits/ --procs 8
+```
+
+`mistfit --help` (or `python -m mistfit.cli --help`) lists the options.
+
+---
+
+## Input table format
+
+**Minimum requirement**: `≥ 3` photometric bands recognized by *minimint* **and** their per-band uncertainties, using the naming conventions below. Each row corresponds to one star. A `source_id` column is recommended (used to name per-star debug folders), but not required.
+
+### Column names and uncertainty suffixes
+
+* **Photometric band columns** use the *minimint* band names (see list below). Examples: `Gaia_G_EDR3`, `DECam_g`, `2MASS_Ks`.
+* The **uncertainty column** for a quantity `<NAME>` is discovered by trying these suffixes (first match wins):
+
+  * `<NAME>_ERR`, `<NAME>_ERRMAG`, `<NAME>_SIG`, `<NAME>_E`, `<NAME>_error`
+
+  Examples: `DECam_g_ERR`, `Gaia_BP_EDR3_ERR`, `Teff_ERR`, `PARALLAX_E`.
+
+### Supported photometric bands
+
+The code auto-detects any of the following present in your table (case-sensitive):
+`Bessell_I, PS_z, 2MASS_Ks, SkyMapper_u, Gaia_RP_MAW, Gaia_RP_DR2Rev, Gaia_BP_EDR3, PS_w, PS_r, SDSS_g, SkyMapper_v, Bessell_V, PS_y, SDSS_r, Bessell_U, Gaia_BP_DR2Rev, WISE_W1, PS_i, Tycho_V, SDSS_i, WISE_W4, Gaia_G_EDR3, Gaia_RP_EDR3, SkyMapper_r, Gaia_BP_MAWb, SDSS_z, Tycho_B, Bessell_B, DECam_i, Gaia_G_DR2Rev, DECam_Y, 2MASS_J, Kepler_Kp, DECam_u, GALEX_FUV, GALEX_NUV, PS_open, SDSS_u, DECam_r, SkyMapper_g, SkyMapper_z, PS_g, Kepler_D51, DECam_g, Bessell_R, DECam_z, Hipparcos_Hp, WISE_W2, TESS, 2MASS_H, WISE_W3, SkyMapper_i, Gaia_G_MAW, Gaia_BP_MAWf`.
+
+> **Bands with no extinction coefficient are excluded.** 23 of the names above
+> have no entry in `EXT_COEFF` and so cannot be de-reddened: every `PS_*` band,
+> `DECam_u`, `TESS`, `Tycho_B`, `Tycho_V`, `Hipparcos_Hp`, `GALEX_FUV`,
+> `GALEX_NUV`, `Kepler_Kp`, `Kepler_D51` and the Gaia `DR2Rev`/`MAW` variants.
+> Before the 2026-09 release these were accepted, reported as used, counted
+> towards the three-band minimum, and then silently ignored by the likelihood.
+> They are now excluded with a `MistfitWarning`. Add a coefficient to
+> `EXT_COEFF` to bring one back. `VISTA_Y/J/H/Ks` **are** supported, with VHS
+> coefficients — do not pass VISTA photometry under 2MASS column names.
+
+> **Gaia special case**: If *all three* Gaia EDR3 bands (`Gaia_G_EDR3`, `Gaia_BP_EDR3`, `Gaia_RP_EDR3`) are present **and** have uncertainties, a color-dependent extinction law is used for those bands; otherwise fixed extinction coefficients from the table below are used.
+
+### Optional spectroscopy and priors
+
+* **Effective temperature:** `Teff` with `Teff_ERR` (or any allowed suffix). **100 K** is *added* to the quoted error (`TEFF_ERR_ADDITIVE`); an optional `TEFF_ERR_FLOOR` then imposes a minimum on the result.
+* **Surface gravity:** `logg` with `logg_ERR`. **0.1 dex** added (`LOGG_ERR_ADDITIVE`), optional `LOGG_ERR_FLOOR`.
+* **Metallicity prior:** Either `FEH_CAL` or `FEH` with matching error column. **0.1 dex** added (`FEH_ERR_ADDITIVE`), optional `FEH_ERR_FLOOR`. If neither is present, \[Fe/H] is free within global bounds.
+* **Parallax prior:** `PARALLAX` with `PARALLAX_ERR`. Optional zero-point correction in `PARALLAX_ZPC` is **added** to `PARALLAX` before use. Since 2026-09 the measurement is used **whatever its sign** (`PARALLAX_MODE`); the old behaviour of discarding non-positive parallaxes is `PARALLAX_MODE=published`.
+* **Reddening prior:** `EBV` with optional `EBV_ERR`. If `EBV` is present without an error, an uncertainty of **0.1** mag is assumed.
+
+### Photometry error budget
+
+**0.1 mag** is *added* to each band’s quoted uncertainty (`PHOT_ERR_ADDITIVE`).
+An optional `PHOT_ERR_FLOOR` then imposes a minimum on the result. Note these were always
+additive despite being described as floors in earlier versions of this file;
+both are now available and independently configurable.
+
+---
+
+---
+
+## Outputs
+
+For each star, the following columns are appended:
+
+* `mass_p16`, `mass_p50`, `mass_p84`, `mass_multimodal`
+* `logage_p16`, `logage_p50`, `logage_p84`, `logage_multimodal`
+* `feh_p16`, `feh_p50`, `feh_p84`, `feh_multimodal`
+* `dist_pc_p16`, `dist_pc_p50`, `dist_pc_p84`, `dist_multimodal`
+* `ebv_p16`, `ebv_p50`, `ebv_p84`, `ebv_multimodal`
+* `lnZ`, `lnZ_err` (Bayesian evidence and its uncertainty from dynesty)
+* `fit_mode`: `spec` if both `Teff` and `logg` entered the likelihood, else `phot`
+
+**Multimodality flags** are binary and computed by KDE peak counting on the 1D posterior for each parameter (requires ≥200 samples; peak prominence ≳ 5% of max). `1` indicates multiple significant modes.
+
+If `debug=True`, per-star artifacts are saved under `output_path/<source_id>/`:
+
+* `runplot.png`, `traceplot.png`, `corner.png`
+* `isochrone_check.png` (only if Gaia G and Teff are present)
+* `summary.json` containing mode, bands used, p50 values, and lnZ
+
+---
+
+## Configuration
+
+Modelling choices are set through **environment variables**, read when
+`mistfit` is imported. That makes it easy to run the same script under a job
+scheduler with one thing changed. From Python, set them before the import (the
+worker processes inherit the environment):
+
+```python
+import os
+os.environ["SAMPLE_COORD"] = "mass_age_weighted"
+os.environ["LOGAGE_MIN"], os.environ["LOGAGE_MAX"] = "9.6", "10.13"   # 4-13.5 Gyr
+from mistfit import fit_stars_with_minimint
+```
+
+| variable | default | what it does |
+|---|---|---|
+| `SAMPLE_COORD` | `mass_age` | sampling coordinates: `mass_age`, `mass_eep` or `mass_age_weighted`. **Use `mass_age_weighted` for giants.** |
+| `PARALLAX_MODE` | `prior` | how the parallax enters: `prior` (sets the distance prior), `likelihood` (Gaussian term on 1/d), or `published` (old behaviour; discards ϖ ≤ 0) |
+| `DISTANCE_PRIOR` | `loguniform` | prior on distance when the parallax is not acting as one: `loguniform`, `flat` or `volume` (∝ d²) |
+| `LOGAGE_MIN`, `LOGAGE_MAX` | `5.0`, `10.114` | age window, log10(yr). The default lower limit admits pre-main-sequence solutions; for old populations narrow it. |
+| `EEP_MIN`, `EEP_MAX` | `200`, `808` | EEP window under `SAMPLE_COORD=mass_eep` |
+| `PHOT_ERR_ADDITIVE` | `0.1` mag | added to every photometric error |
+| `TEFF_ERR_ADDITIVE` | `100` K | added to the Teff error |
+| `LOGG_ERR_ADDITIVE` | `0.1` dex | added to the logg error |
+| `FEH_ERR_ADDITIVE` | `0.1` dex | added to the [Fe/H] error |
+| `*_ERR_FLOOR` | none | minimum error after the addition (`PHOT_`, `TEFF_`, `LOGG_`, `FEH_`) |
+| `RNG_PER_STAR` | `1` | seed each star from (`random_seed`, `source_id`), so a star's result does not depend on the rest of the table |
+
+Function arguments (`nlive`, `dlogz`, `processes`, `random_seed`, `ebv_range`,
+`debug`) are described under [API reference](#api-reference).
+
+### Choosing settings for your science case
 
 There is no single right answer here, which is why these are settings rather
 than a decision baked into the code. What follows is guidance, not a
 recommendation — the right choice depends on how informative your parallaxes
 are and where your targets actually sit.
 
-### The one question that decides most of it
+#### The one question that decides most of it
 
 **How informative is your parallax?** Not whether it is positive — whether
 `|ϖ| / σ_ϖ` is large. For a star at 60 kpc the true parallax is 0.017 mas
@@ -51,7 +292,7 @@ distance on its own.
 | no parallax at all | `DISTANCE_PRIOR` is doing everything | pick it from where your targets are; `loguniform` puts 70% of its mass inside 10 kpc |
 | reproducing a pre-2026-09 run | `PARALLAX_MODE=published RNG_PER_STAR=0 SAMPLE_COORD=mass_age` | see CHANGELOG; it will not be bit-identical |
 
-### The other question: are your stars evolved?
+#### The other question: are your stars evolved?
 
 **`SAMPLE_COORD` decides how well the sampler can resolve the giant branch.**
 Under the default `mass_age`, at a fixed old age the whole RGB lies in a narrow
@@ -93,7 +334,7 @@ The output columns are identical in all three — the EEP is converted back to
 logAge before anything is summarised. Only a raw dynesty **checkpoint** under
 `mass_eep` holds the EEP in column 1.
 
-### The trade-off between `prior` and `likelihood`
+#### The trade-off between `prior` and `likelihood`
 
 Both use the parallax regardless of sign. They differ in *where* it enters, and
 the difference is not only formal:
@@ -111,7 +352,7 @@ the difference is not only formal:
 If you use `likelihood`, pair it with a distance prior that does not seed the
 sampler in the wrong place, and check the diagnostics below.
 
-### Error floors
+#### Error floors
 
 Use `*_ERR_FLOOR` when your pipeline reports uncertainties that are implausibly
 small rather than merely optimistic — spectroscopic `logg` quoted to 0.0004 dex
@@ -124,7 +365,7 @@ together are what let fits collapse onto pre-main-sequence solutions. Either
 one alone was enough to prevent it in testing, so if you must use a wide `logg`
 floor, keep the parallax.
 
-### Diagnostics worth running whatever you choose
+#### Diagnostics worth running whatever you choose
 
 None of these settings can be validated from the fitted distance alone. Check,
 per star:
@@ -138,122 +379,6 @@ per star:
 
 A fit that disagrees with its own inputs by many σ is an artifact regardless of
 how tight its error bars look.
-
-## Citation
-
-If this tool is used in a publication, please cite **dynesty**, **minimint**, and Cavieres (in prep).
-
-
-## Quick start
-
----
-
-## Installation & requirements
-
-* Python ≥ 3.9 recommended
-* Dependencies: `numpy`, `scipy`, `matplotlib` (headless OK), `astropy`, `dynesty`, `minimint`, `tqdm`, `corner` (optional, for debug corner plots)
-
-Install with pip (example):
-
-```bash
-pip install mistfit
-```
-
-
-### Python example
-
-```python
-from astropy.table import Table
-from mistfit import fit_stars_with_minimint
-
-if __name__ == "__main__":
-    tab = Table.read("xshooter_with_phot_gaia_minimint.fits")
-    out = fit_stars_with_minimint(
-        tab,
-        output_path="xshooter_nested",
-        nlive=5000,
-        processes=8,
-        debug=True,
-    )
-```
-
-### CLI
-
-```bash
-# run a nested fit on an input catalog (FITS/ECSV supported by Astropy)
-mistfit /path/to/input_table.fits \
-  --outdir /path/to/out \
-  --nlive 5000 \
-  --dlogz 0.01 \
-  --procs 8 \
-  --debug
-
-```
-
-The outputs are written to `--outdir`:
---outdir will be created if it doesn’t exist; results are saved as fit_results.fits (or .ecsv fallback).
-
-* Updated table with appended posterior columns: `fit_results.fits` (or `.ecsv` if FITS types conflict)
-* If `--debug`, per-star folders with `runplot.png`, `traceplot.png`, `corner.png`, optional `isochrone_check.png`, and `summary.json`.
-
-Helpful commands:
-
-```bash
-mistfit --help
-```
-
-module form (works even without the console script on PATH)
-
-```bash
-python -m mistfit.cli --help
-```
-
----
-
-## Input table format
-
-**Minimum requirement**: `≥ 3` photometric bands recognized by *minimint* **and** their per-band uncertainties, using the naming conventions below. Each row corresponds to one star. A `source_id` column is recommended (used to name per-star debug folders), but not required.
-
-### Column names and uncertainty suffixes
-
-* **Photometric band columns** use the *minimint* band names (see list below). Examples: `Gaia_G_EDR3`, `DECam_g`, `2MASS_Ks`.
-* The **uncertainty column** for a quantity `<NAME>` is discovered by trying these suffixes (first match wins):
-
-  * `<NAME>_ERR`, `<NAME>_ERRMAG`, `<NAME>_SIG`, `<NAME>_E`, `<NAME>_error`
-
-  Examples: `DECam_g_ERR`, `Gaia_BP_EDR3_ERR`, `Teff_ERR`, `PARALLAX_E`.
-
-### Supported photometric bands (subset)
-
-The code auto-detects any of the following present in your table (case-sensitive):
-`Bessell_I, PS_z, 2MASS_Ks, SkyMapper_u, Gaia_RP_MAW, Gaia_RP_DR2Rev, Gaia_BP_EDR3, PS_w, PS_r, SDSS_g, SkyMapper_v, Bessell_V, PS_y, SDSS_r, Bessell_U, Gaia_BP_DR2Rev, WISE_W1, PS_i, Tycho_V, SDSS_i, WISE_W4, Gaia_G_EDR3, Gaia_RP_EDR3, SkyMapper_r, Gaia_BP_MAWb, SDSS_z, Tycho_B, Bessell_B, DECam_i, Gaia_G_DR2Rev, DECam_Y, 2MASS_J, Kepler_Kp, DECam_u, GALEX_FUV, GALEX_NUV, PS_open, SDSS_u, DECam_r, SkyMapper_g, SkyMapper_z, PS_g, Kepler_D51, DECam_g, Bessell_R, DECam_z, Hipparcos_Hp, WISE_W2, TESS, 2MASS_H, WISE_W3, SkyMapper_i, Gaia_G_MAW, Gaia_BP_MAWf`.
-
-> **Bands with no extinction coefficient are excluded.** 23 of the names above
-> have no entry in `EXT_COEFF` and so cannot be de-reddened: every `PS_*` band,
-> `DECam_u`, `TESS`, `Tycho_B`, `Tycho_V`, `Hipparcos_Hp`, `GALEX_FUV`,
-> `GALEX_NUV`, `Kepler_Kp`, `Kepler_D51` and the Gaia `DR2Rev`/`MAW` variants.
-> Before the 2026-09 release these were accepted, reported as used, counted
-> towards the three-band minimum, and then silently ignored by the likelihood.
-> They are now excluded with a `MistfitWarning`. Add a coefficient to
-> `EXT_COEFF` to bring one back. `VISTA_Y/J/H/Ks` **are** supported, with VHS
-> coefficients — do not pass VISTA photometry under 2MASS column names.
-
-> **Gaia special case**: If *all three* Gaia EDR3 bands (`Gaia_G_EDR3`, `Gaia_BP_EDR3`, `Gaia_RP_EDR3`) are present **and** have uncertainties, a color-dependent extinction law is used for those bands; otherwise fixed extinction coefficients from the table below are used.
-
-### Optional spectroscopy and priors
-
-* **Effective temperature:** `Teff` with `Teff_ERR` (or any allowed suffix). **100 K** is *added* to the quoted error (`TEFF_ERR_ADDITIVE`); an optional `TEFF_ERR_FLOOR` then imposes a minimum on the result.
-* **Surface gravity:** `logg` with `logg_ERR`. **0.1 dex** added (`LOGG_ERR_ADDITIVE`), optional `LOGG_ERR_FLOOR`.
-* **Metallicity prior:** Either `FEH_CAL` or `FEH` with matching error column. **0.1 dex** added (`FEH_ERR_ADDITIVE`), optional `FEH_ERR_FLOOR`. If neither is present, \[Fe/H] is free within global bounds.
-* **Parallax prior:** `PARALLAX` with `PARALLAX_ERR`. Optional zero-point correction in `PARALLAX_ZPC` is **added** to `PARALLAX` before use. Since 2026-09 the measurement is used **whatever its sign** (`PARALLAX_MODE`); the old behaviour of discarding non-positive parallaxes is `PARALLAX_MODE=published`.
-* **Reddening prior:** `EBV` with optional `EBV_ERR`. If `EBV` is present without an error, an uncertainty of **0.1** mag is assumed.
-
-### Photometry error budget
-
-**0.1 mag** is *added* to each band’s quoted uncertainty (`PHOT_ERR_ADDITIVE`).
-An optional `PHOT_ERR_FLOOR` then imposes a minimum on the result. Note these were always
-additive despite being described as floors in earlier versions of this file;
-both are now available and independently configurable.
 
 ---
 
@@ -279,31 +404,9 @@ The sampler explores a 5D parameter vector:
 
 * **Missing EBV**: No `EBV` column → E(B−V) prior is uniform over the global `ebv_range` (default `[0.0, 1.5]`). If `EBV` exists **without** an error, we assume `EBV_ERR = 0.1` mag and set the prior to ±5σ around that value (clipped to `[EBV_MIN_DEFAULT, EBV_MAX_DEFAULT]`, default `[0, 1.5]`).
 
-* **Photometry naming mismatches**: Columns must exactly match supported *minimint* band names. If your catalog uses different names, rename columns before running (see snippet below).
+* **Photometry naming mismatches**: Columns must exactly match supported *minimint* band names. If your catalog uses different names, rename columns before running (see [A real catalogue](#a-real-catalogue)).
 
 * **Gaia extinction**: If Gaia triplet (`G,BP,RP`) is available with errors, a color-dependent law is iteratively applied; otherwise scalar `A_λ/E(B−V)` coefficients are used.
-
----
-
-## Outputs
-
-For each star, the following columns are appended:
-
-* `mass_p16`, `mass_p50`, `mass_p84`, `mass_multimodal`
-* `logage_p16`, `logage_p50`, `logage_p84`, `logage_multimodal`
-* `feh_p16`, `feh_p50`, `feh_p84`, `feh_multimodal`
-* `dist_pc_p16`, `dist_pc_p50`, `dist_pc_p84`, `dist_multimodal`
-* `ebv_p16`, `ebv_p50`, `ebv_p84`, `ebv_multimodal`
-* `lnZ`, `lnZ_err` (Bayesian evidence and its uncertainty from dynesty)
-* `fit_mode`: `spec` if both `Teff` and `logg` entered the likelihood, else `phot`
-
-**Multimodality flags** are binary and computed by KDE peak counting on the 1D posterior for each parameter (requires ≥200 samples; peak prominence ≳ 5% of max). `1` indicates multiple significant modes.
-
-If `debug=True`, per-star artifacts are saved under `output_path/<source_id>/`:
-
-* `runplot.png`, `traceplot.png`, `corner.png`
-* `isochrone_check.png` (only if Gaia G and Teff are present)
-* `summary.json` containing mode, bands used, p50 values, and lnZ
 
 ---
 
@@ -322,7 +425,7 @@ When not using the Gaia color-dependent law, these coefficients are applied:
 
 ---
 
-## Tuning & performance
+## Performance tuning
 
 * **`nlive`**: Initial live points for dynesty’s dynamic sampler (`nlive_init`). Larger values better resolve multi-modality and tails, at higher cost. Typical: 2000–8000.
 * **`dlogz`**: Evidence tolerance (`dlogz_init`). Smaller is more thorough.
@@ -333,51 +436,6 @@ When not using the Gaia color-dependent law, these coefficients are applied:
 Checkpoints (`*_checkpoint.h5`) are written only if `debug=True`.
 
 ---
-
-## End-to-end minimal schema examples
-
-### Photometry-only (Gaia + DECam)
-
-Required (any ≥3 bands with errors):
-
-```
-source_id
-Gaia_G_EDR3, Gaia_G_EDR3_ERR
-Gaia_BP_EDR3, Gaia_BP_EDR3_ERR
-Gaia_RP_EDR3, Gaia_RP_EDR3_ERR
-DECam_g, DECam_g_ERR
-```
-
-Optional priors:
-
-```
-EBV, EBV_ERR
-PARALLAX, PARALLAX_ERR, PARALLAX_ZPC
-FEH (or FEH_CAL), FEH_ERR
-```
-
-### Photometry + spectroscopy
-
-Add:
-
-```
-Teff, Teff_ERR
-logg, logg_ERR
-```
-
-### Renaming helper (example)
-
-```python
-# Suppose your catalog has G_BP, G_RP, G (Gaia EDR3). Rename to minimint names:
-for old, new in {
-    'phot_g_mean_mag': 'Gaia_G_EDR3',
-    'phot_bp_mean_mag': 'Gaia_BP_EDR3',
-    'phot_rp_mean_mag': 'Gaia_RP_EDR3',
-}.items():
-    if old in tab.colnames and new not in tab.colnames:
-        tab.rename_column(old, new)
-# Likewise ensure error columns exist with one of the accepted suffixes.
-```
 
 ---
 
@@ -400,6 +458,8 @@ fit_stars_with_minimint(
 
 ---
 
+---
+
 ## Notes & caveats
 
 * Photometric/spectroscopic errors are inflated additively by default (0.1 mag, 100 K, 0.1 dex); optional floors are available. See `CHANGELOG.md`.
@@ -409,7 +469,71 @@ fit_stars_with_minimint(
 
 ---
 
+## Upgrading from a pre-2026-09 version
+
+Four bugs fixed and two modelling choices exposed as settings. Two of the fixes
+change results even with every setting left at its default, so read
+[CHANGELOG.md](CHANGELOG.md) before rerunning anything you have published.
+
+| | |
+|---|---|
+| **band ordering** | the band list was built by iterating a `set`, so the order of the terms summed into the log-likelihood followed `PYTHONHASHSEED`. Two runs of the same stars on the same data gave distances differing by factors of up to 4.6. |
+| **silent band drops** | 23 of 58 "supported" bands have no extinction coefficient and were accepted, reported as used, then ignored by the likelihood. Every Pan-STARRS band was among them. |
+| **shared random stream** | one `Generator` per table, handed to each star in turn, so results depended on row order and on how the run was split across jobs. |
+| **`__version__`** | looked up a package name that no longer existed, so it was always `0+unknown`. |
+| **`PARALLAX_MODE`** | the parallax was discarded whenever measured ≤ 0 — which, for distant stars, is noise on a small positive number and a *selective* discard. Now used regardless of sign by default. |
+| **`DISTANCE_PRIOR`** | `loguniform` \| `flat` \| `volume`. The historical `loguniform` puts 70% of its prior mass inside 10 kpc. |
+| **`SAMPLE_COORD`** | `mass_age` \| `mass_eep` \| `mass_age_weighted`. Sampling in EEP rather than age reaches the giant branch, which spans 47.7% of a U(200, 808) EEP prior against 1.8% of a 4–13 Gyr age prior. `mass_age_weighted` reaches it too while keeping `mass_age`'s prior and evidence (2026-09c). |
+
+Configuration is read from the environment, so a scheduler run can change one
+setting and nothing else:
+
+```bash
+PARALLAX_MODE=prior DISTANCE_PRIOR=volume LOGG_ERR_FLOOR=0.3 python run_nest.py
+```
+
+---
+
+## Citing mistfit
+
+If you use `mistfit` in published work, please cite the paper it was developed
+for:
+
+> Cavieres, M., Chanamé, J., Navarrete, C., et al. 2025,
+> *The Distant Milky Way Halo from the Southern Hemisphere: Characterization of
+> the LMC-induced Dynamical Friction Wake*, ApJ, 983, 83.
+> [doi:10.3847/1538-4357/adbf08](https://doi.org/10.3847/1538-4357/adbf08) ·
+> [arXiv:2410.00114](https://arxiv.org/abs/2410.00114) ·
+> [ADS](https://ui.adsabs.harvard.edu/abs/2025ApJ...983...83C)
+
+```bibtex
+@ARTICLE{Cavieres2025,
+       author = {{Cavieres}, Manuel and {Chanam{\'e}}, Julio and {Navarrete}, Camila and
+                 {Ordenes-Brice{\~n}o}, Yasna and {Garavito-Camargo}, Nicol{\'a}s and
+                 {Besla}, Gurtina and {Hempel}, Maren and {Vivas}, A. Katherina and
+                 {G{\'o}mez}, Facundo A.},
+        title = "{The Distant Milky Way Halo from the Southern Hemisphere: Characterization of the LMC-induced Dynamical Friction Wake}",
+      journal = {\apj},
+         year = 2025,
+       volume = {983},
+       number = {1},
+          eid = {83},
+          doi = {10.3847/1538-4357/adbf08},
+       eprint = {2410.00114},
+archivePrefix = {arXiv},
+       adsurl = {https://ui.adsabs.harvard.edu/abs/2025ApJ...983...83C}
+}
+```
+
+`mistfit` is a thin layer over other people's work; please also cite:
+
+* **MIST** — [Dotter 2016, ApJS, 222, 8](https://doi.org/10.3847/0067-0049/222/1/8);
+  [Choi et al. 2016, ApJ, 823, 102](https://doi.org/10.3847/0004-637X/823/2/102)
+* **dynesty** — [Speagle 2020, MNRAS, 493, 3132](https://doi.org/10.1093/mnras/staa278)
+* **minimint** — [Koposov, github.com/segasai/minimint](https://github.com/segasai/minimint)
+
+---
+
 ## License
 
-Do whatever you want, fully open source
-
+MIT — see [LICENSE](LICENSE).
