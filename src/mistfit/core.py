@@ -848,6 +848,68 @@ def loglike_spec_theta(theta, obs, bands):
         ll += -0.5 * ((og - model['logg']) / eg)**2
     return float(ll)
 
+# --- user-defined priors -----------------------------------------------------
+# A log_prior(mass, logage, feh, dist_pc, ebv, star) -> float supplied by the
+# user is ADDED to the log-likelihood, which multiplies the built-in prior by
+# exp(log_prior). The posterior is then exactly the one for prior
+# (built-in x exp(log_prior)); the evidence is too, up to the constant
+# ln of exp(log_prior)'s normalisation under the built-in prior -- so lnZ stays
+# comparable between fits that use the same log_prior and no others.
+#
+# It is applied in the likelihood rather than in ptform_u5 because a prior
+# transform needs an inverse CDF, which an arbitrary density does not have.
+# The price is sampling efficiency: a prior much narrower than the built-in
+# one wastes live points where it is ~0. Make the built-in prior broad and flat
+# in the coordinate you are replacing (DISTANCE_PRIOR=flat, an age window) and
+# put the shape in log_prior.
+#
+# `logage` is always log10(age/yr), converted from the EEP under
+# SAMPLE_COORD="mass_eep". `star` is the input row as a plain dict, so a prior
+# can depend on the star (its l, b, a cluster membership flag, ...).
+#
+# Must be picklable: a function defined at module level, in your script or a
+# module, not a lambda or a closure. LOG_PRIOR="package.module:function" in the
+# environment names one for the CLI.
+
+def _resolve_log_prior(spec):
+    """'package.module:function' -> the function."""
+    import importlib
+    mod, sep, name = spec.partition(":")
+    if not sep or not mod or not name:
+        raise ValueError(
+            f"LOG_PRIOR must look like 'package.module:function', got {spec!r}")
+    return getattr(importlib.import_module(mod), name)
+
+
+def _row_as_dict(row):
+    """An astropy Row as a picklable dict of plain values; masked -> NaN."""
+    out = {}
+    for c in row.colnames:
+        v = row[c]
+        if v is ma.masked:
+            v = np.nan
+        elif np.ndim(v) == 0 and hasattr(v, "item"):
+            v = v.item()
+        out[c] = v
+    return out
+
+
+def loglike_with_log_prior(theta, obs, bands, base_loglike, log_prior, star):
+    """base_loglike + log_prior, evaluated only where the base is finite."""
+    ll = base_loglike(theta, obs, bands)
+    if not np.isfinite(ll):
+        return -np.inf
+    m, la, f, d, ebv = theta
+    if SAMPLE_COORD == "mass_eep":
+        la = logage_from_eep(m, la, f)
+        if not np.isfinite(la):
+            return -np.inf
+    lp = float(log_prior(m, la, f, d, ebv, star))
+    if not np.isfinite(lp):
+        return -np.inf
+    return float(ll + lp)
+
+
 # main function
 def fit_stars_with_minimint(
     table: Table,
@@ -858,6 +920,7 @@ def fit_stars_with_minimint(
     debug: bool = False,
     random_seed: int = 42,
     ebv_range: tuple[float, float] | None = None,
+    log_prior=None,
 ) -> Table:
     """
     Run dynesty (internal pool) per star and append posterior summaries to the input table.
@@ -866,6 +929,12 @@ def fit_stars_with_minimint(
     None means (EBV_MIN_DEFAULT, EBV_MAX_DEFAULT). A star with a measurement
     gets +-5 sigma around it instead, clipped to (EBV_MIN_DEFAULT,
     EBV_MAX_DEFAULT) whatever ebv_range is.
+
+    log_prior, if given, is a function
+    log_prior(mass, logage, feh, dist_pc, ebv, star) -> float whose value
+    multiplies the built-in prior by exp(log_prior); `star` is the row as a
+    dict. None falls back to LOG_PRIOR="module:function" in the environment,
+    if set. See "user-defined priors" above.
 
     Columns appended:
       mass_p16/p50/p84, mass_multimodal
@@ -881,6 +950,8 @@ def fit_stars_with_minimint(
     # See ptform_u5 for the same trap.
     if ebv_range is None:
         ebv_range = (EBV_MIN_DEFAULT, EBV_MAX_DEFAULT)
+    if log_prior is None and os.environ.get("LOG_PRIOR", "").strip():
+        log_prior = _resolve_log_prior(os.environ["LOG_PRIOR"].strip())
 
     # One Generator per star, not one per table. The old code created a single
     # Generator here and passed it to every star in turn, so the stream a star
@@ -948,6 +1019,9 @@ def fit_stars_with_minimint(
 
         # Args (must be picklable)
         logl_args = (obs, bands)
+        if log_prior is not None:
+            logl_args = (obs, bands, loglike, log_prior, _row_as_dict(row))
+            loglike = loglike_with_log_prior
         ptform_args = (obs, ebv_range_row)
 
         ndim = 5

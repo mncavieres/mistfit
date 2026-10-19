@@ -167,6 +167,155 @@ SAMPLE_COORD=mass_age_weighted PARALLAX_MODE=likelihood DISTANCE_PRIOR=flat \
 
 ---
 
+## Priors and sampling modes
+
+### The built-in prior
+
+Each star has five free parameters. With nothing configured, their priors are:
+
+| parameter | prior | range | change it with |
+|---|---|---|---|
+| mass [M☉] | Salpeter IMF, α = 2.35 | 0.1–100, and below the isochrone's maximum mass | `log_prior` |
+| log10(age/yr) | uniform | 5.0–10.114 (13 Gyr) | `LOGAGE_MIN`, `LOGAGE_MAX`; `SAMPLE_COORD=mass_eep`; `log_prior` |
+| [Fe/H] | Gaussian from the `FEH` column (truncated to the grid); uniform if absent | −2.9 to +0.9 | the `FEH`/`FEH_ERR` columns; `log_prior` |
+| distance [pc] | from the parallax if there is one, else log-uniform | 10 – 2×10⁵ | `PARALLAX_MODE`, `DISTANCE_PRIOR`; `log_prior` |
+| E(B−V) | uniform; ±5σ around the `EBV` column if present | 0–1.5 | `EBV`/`EBV_ERR` columns; `ebv_range=`; `log_prior` |
+
+The likelihood is the photometry (model magnitudes, reddened and moved to the
+distance), plus Teff and logg when both are given, plus the parallax under
+`PARALLAX_MODE=likelihood`.
+
+### Sampling modes: `SAMPLE_COORD`
+
+Which coordinates the sampler moves in. This matters most for evolved stars:
+at fixed age the whole red giant branch occupies a sliver of mass just below
+the isochrone's maximum, which a sampler drawing mass and age independently
+rarely hits.
+
+| mode | samples | prior on age | use it for |
+|---|---|---|---|
+| `mass_age` (default) | mass, logAge | uniform in logAge | dwarfs and subgiants; reproducing older runs |
+| `mass_age_weighted` | mass, logAge, with masses proposed near the isochrone tip and the proposal divided back out | uniform in logAge, **identical to `mass_age`** (same posterior, same `lnZ`) | **giants**; anything with logg ≲ 2 |
+| `mass_eep` | mass, EEP (evolutionary phase); logAge derived, as in MINESweeper | uniform in EEP — a *different* prior, which up-weights fast phases and ends at the start of the TP-AGB | matching MINESweeper conventions |
+
+On dwarfs the three agree. On giants `mass_age` can miss posterior mass;
+`mass_age_weighted` fixes that without changing the prior. See
+[Choosing settings](#choosing-settings-for-your-science-case) for numbers.
+
+### Prior modes: `PARALLAX_MODE` and `DISTANCE_PRIOR`
+
+How the distance is constrained.
+
+| `PARALLAX_MODE` | the parallax… |
+|---|---|
+| `prior` (default) | *is* the distance prior: ϖ drawn from its Gaussian, truncated at 0, and d = 1000/ϖ. Robust on multimodal posteriors. |
+| `likelihood` | enters the likelihood as a Gaussian measurement of 1/d; the prior on d is `DISTANCE_PRIOR`. Formally cleanest. |
+| `published` | as `prior`, but discarded when ϖ ≤ 0 (pre-2026-09 behaviour, biased for distant stars). |
+
+| `DISTANCE_PRIOR` | p(d) | prior mass inside 10 kpc |
+|---|---|---|
+| `loguniform` (default) | ∝ 1/d | 70% |
+| `flat` | constant | 5% |
+| `volume` | ∝ d² (constant space density) | ≈ 0% |
+
+`DISTANCE_PRIOR` is used whenever the parallax is not acting as the prior:
+always under `likelihood`, and for every star without a parallax.
+
+### Defining your own prior
+
+Pass `log_prior=` a function of the five parameters and the star. Its value is
+added to the log-likelihood, so it **multiplies** the built-in prior:
+
+```python
+def log_prior(mass, logage, feh, dist_pc, ebv, star):
+    """ln of an extra prior factor. `star` is this star's input row, as a dict."""
+    return ...   # a float; -np.inf forbids the point
+```
+
+`logage` is always log10(age/yr), whichever `SAMPLE_COORD` you use, and `star`
+gives access to any column of your table (coordinates, a membership flag, a
+per-star guess), so the prior can differ from star to star.
+
+**Example: an age prior.** The halo is old. Instead of a hard age window, put
+a soft one on top of the default uniform-in-logAge prior:
+
+```python
+import numpy as np
+from astropy.table import Table
+from mistfit import fit_stars_with_minimint
+
+def old_halo(mass, logage, feh, dist_pc, ebv, star):
+    return -0.5 * ((logage - 10.05) / 0.1) ** 2       # ~11 Gyr ± 25%
+
+if __name__ == "__main__":
+    tab = Table.read("my_stars.fits")
+    out = fit_stars_with_minimint(tab, "fits/", log_prior=old_halo)
+```
+
+**Example: replacing the distance prior** with a stellar-halo density along
+each star's line of sight, ρ ∝ r⁻³·⁵ in Galactocentric radius. Set the
+built-in prior flat so that this function *is* the distance prior, and keep the
+parallax in the likelihood:
+
+```python
+import numpy as np
+
+R_SUN = 8122.0   # pc
+
+def halo_density(mass, logage, feh, dist_pc, ebv, star):
+    l, b = np.radians(star["l"]), np.radians(star["b"])
+    x = R_SUN - dist_pc * np.cos(b) * np.cos(l)
+    y = dist_pc * np.cos(b) * np.sin(l)
+    z = dist_pc * np.sin(b)
+    r = np.sqrt(x**2 + y**2 + z**2)
+    return 2 * np.log(dist_pc) - 3.5 * np.log(r)    # d² ρ(r): volume element × density
+```
+
+```bash
+PARALLAX_MODE=likelihood DISTANCE_PRIOR=flat python run.py
+```
+
+(For a magnitude-limited sample of distant stars this is usually the *wrong*
+prior: it ignores the selection function, which is what made your sample
+distant. It is here as an example of the mechanics.)
+
+**Example: a different IMF.** The built-in mass prior is Salpeter, ∝ m⁻²·³⁵.
+To replace it, divide it out and multiply in yours:
+
+```python
+def kroupa(mass, logage, feh, dist_pc, ebv, star):
+    alpha = 1.3 if mass < 0.5 else 2.3
+    ln_kroupa = -alpha * np.log(mass) + (np.log(0.5) if mass >= 0.5 else 0.0)  # continuous at 0.5
+    return ln_kroupa + 2.35 * np.log(mass)      # ... minus ln Salpeter
+```
+
+**From the command line**, name the function in `LOG_PRIOR` as
+`module:function`; the module must be importable:
+
+```bash
+PYTHONPATH=. LOG_PRIOR=my_priors:halo_density DISTANCE_PRIOR=flat \
+  PARALLAX_MODE=likelihood mistfit my_stars.fits --outdir fits/
+```
+
+Things to know:
+
+* **Define the function at the top level** of a script or module, not as a
+  lambda or inside `if __name__ == "__main__":`. It is sent to the worker
+  processes by name.
+* **It multiplies, not replaces.** To replace a built-in prior, make that one
+  flat (`DISTANCE_PRIOR=flat`; the age prior is already flat in logAge under
+  the age-based `SAMPLE_COORD`s) or divide it out as in the IMF example. Under
+  `PARALLAX_MODE=prior`, a star with a parallax already has a parallax-shaped
+  distance prior, which yours multiplies.
+* **Keep the built-in range wide.** The sampler draws from the built-in prior
+  and your factor reweights it. A factor much narrower than the built-in range
+  spends most live points where it is ≈ 0: correct, but slow, so narrow
+  the built-in range too where you can (e.g. `LOGAGE_MIN`).
+* **`lnZ` includes your factor's normalisation**, so evidences are comparable
+  only between fits with the same `log_prior`.
+
+---
+
 ## Input table format
 
 **Minimum requirement**: `≥ 3` photometric bands recognized by *minimint* **and** their per-band uncertainties, using the naming conventions below. Each row corresponds to one star. A `source_id` column is recommended (used to name per-star debug folders), but not required.
@@ -264,10 +413,11 @@ from mistfit import fit_stars_with_minimint
 | `LOGG_ERR_ADDITIVE` | `0.1` dex | added to the logg error |
 | `FEH_ERR_ADDITIVE` | `0.1` dex | added to the [Fe/H] error |
 | `*_ERR_FLOOR` | none | minimum error after the addition (`PHOT_`, `TEFF_`, `LOGG_`, `FEH_`) |
+| `LOG_PRIOR` | none | `module:function` of a user-defined prior, for the CLI (see [Defining your own prior](#defining-your-own-prior)) |
 | `RNG_PER_STAR` | `1` | seed each star from (`random_seed`, `source_id`), so a star's result does not depend on the rest of the table |
 
 Function arguments (`nlive`, `dlogz`, `processes`, `random_seed`, `ebv_range`,
-`debug`) are described under [API reference](#api-reference).
+`log_prior`, `debug`) are described under [API reference](#api-reference).
 
 ### Choosing settings for your science case
 
@@ -382,20 +532,6 @@ how tight its error bars look.
 
 ---
 
-## How the fit works (parameters & priors)
-
-The sampler explores a 5D parameter vector:
-
-* **Mass** \[M☉], prior \~ Salpeter (α = 2.35) within `[0.1, 100]` (`M_MIN`, `M_MAX`) and, under `SAMPLE_COORD=mass_age`, below the model’s maximum mass for the chosen age/metallicity
-* **log10(Age/yr)** uniform in `[LOGAGE_MIN, LOGAGE_MAX]`, default `[5.0, 10.1139]` (13 Gyr), both settable from the environment. Under `SAMPLE_COORD=mass_eep` logAge is derived from the EEP instead, and points outside the window are rejected.
-* **\[Fe/H]**: truncated normal around the provided prior (if any), else uniform in `[-2.9, 0.9]`
-* **Distance** \[pc], within `[10, 2e5]` (`DIST_MIN`, `DIST_MAX`): from the **parallax** if one is given — `1000/ϖ`, with ϖ drawn from the measurement's Gaussian truncated at zero — otherwise from `DISTANCE_PRIOR`, log-uniform by default. Under `PARALLAX_MODE=likelihood` the distance always comes from `DISTANCE_PRIOR` and the parallax enters the likelihood instead.
-* **E(B−V)**: uniform over `ebv_range`, default `[EBV_MIN_DEFAULT, EBV_MAX_DEFAULT]` = `[0.0, 1.5]`; for a star with an `EBV` value, over ±5σ around it, clipped to `[EBV_MIN_DEFAULT, EBV_MAX_DEFAULT]`.
-
-**Likelihood** combines photometry (with extinction and distance modulus), spectroscopic terms for `Teff` and `logg` when both are available, and the parallax under `PARALLAX_MODE=likelihood`.
-
----
-
 ## Behavior in common scenarios
 
 * **Photometry-only mode**: Triggered when *both* `Teff` **and** `logg` are **not** simultaneously available with errors. The fit still runs using photometry (and any priors) and reports posteriors. This is the default for most catalog-only use cases.
@@ -451,6 +587,7 @@ fit_stars_with_minimint(
     debug: bool = False,
     random_seed: int = 42,
     ebv_range: tuple[float, float] | None = None,  # None: (EBV_MIN_DEFAULT, EBV_MAX_DEFAULT) = (0.0, 1.5)
+    log_prior=None,   # f(mass, logage, feh, dist_pc, ebv, star) -> float; None: LOG_PRIOR from the environment
 ) -> Table
 ```
 

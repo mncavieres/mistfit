@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-10 — user-defined priors
+
+### ADDED — `log_prior=` and `LOG_PRIOR`
+
+`fit_stars_with_minimint(..., log_prior=f)` takes a function
+
+```python
+def f(mass, logage, feh, dist_pc, ebv, star) -> float
+```
+
+whose value is added to the log-likelihood, so the prior becomes the built-in
+one multiplied by `exp(f)`. `logage` is always log10(age/yr), converted from
+the EEP under `SAMPLE_COORD=mass_eep`; `star` is the input row as a dict, so a
+prior can depend on the star. For the CLI, `LOG_PRIOR="package.module:function"`
+in the environment names one.
+
+It is applied in the likelihood, not the prior transform, because a transform
+needs an inverse CDF and an arbitrary density does not have one. Two
+consequences, both in the README:
+
+* to *replace* a built-in prior rather than multiply it, make the built-in one
+  flat in that coordinate (`DISTANCE_PRIOR=flat`; the age prior is already
+  uniform in logAge under the age-based coordinates) or divide it out;
+* `lnZ` absorbs the normalisation of `exp(f)`, so it is comparable only
+  between fits with the same `log_prior`.
+
+Nothing changes when `log_prior` is not given. Checked end to end: a Gaussian
+distance prior of 3000 ± 100 pc on a photometry-only dwarf, defined in the
+calling script and passed through the spawn-started process pool, returned
+2999 (+91/−97) pc. Tests: `test_log_prior_*` in `test_config.py`.
+
 ## 2026-09d — bounds reassigned after import now reach the prior
 
 ### FIXED — `core.LOGAGE_MIN = …` after import did not move the age prior

@@ -21,6 +21,7 @@ CONFIG_VARS = (
     "PHOT_ERR_ADDITIVE", "TEFF_ERR_FLOOR", "LOGG_ERR_FLOOR",
     "FEH_ERR_FLOOR", "PHOT_ERR_FLOOR",
     "SAMPLE_COORD", "EEP_MIN", "EEP_MAX", "LOGAGE_MIN", "LOGAGE_MAX",
+    "LOG_PRIOR",
 )
 
 
@@ -509,3 +510,86 @@ def test_proposal_and_weight_see_the_same_mass_bounds_after_an_override():
     mass = m.ptform_u5(u, {}, (0.0, 0.5))[0]
     assert mass <= 50.0
     assert np.isfinite(m.mass_weight_log(mass * 0.999, 6.0, 0.0))
+
+
+# --- user-defined priors (2026-10) -------------------------------------------
+
+def _base_minus_three(theta, obs, bands):
+    return -3.0
+
+
+def _gaussian_distance_prior(mass, logage, feh, dist_pc, ebv, star):
+    return -0.5 * ((dist_pc - 5000.0) / 100.0) ** 2
+
+
+def test_log_prior_is_added_to_the_likelihood():
+    core = load()
+    theta = np.array([1.0, 9.5, -1.0, 5100.0, 0.05])
+    ll = core.loglike_with_log_prior(theta, {}, [], _base_minus_three,
+                                     _gaussian_distance_prior, {})
+    assert ll == pytest.approx(-3.0 - 0.5)
+
+
+def test_log_prior_receives_the_parameters_and_the_star():
+    core = load()
+    seen = []
+
+    def spy(*args):
+        seen.append(args)
+        return 0.0
+
+    theta = np.array([1.1, 9.7, -0.4, 2500.0, 0.02])
+    core.loglike_with_log_prior(theta, {}, [], _base_minus_three, spy, {"l": 280.0})
+    assert seen == [(1.1, 9.7, -0.4, 2500.0, 0.02, {"l": 280.0})]
+
+
+def test_log_prior_is_not_evaluated_where_the_likelihood_rejects():
+    core = load()
+
+    def boom(*args):
+        raise AssertionError("called on a rejected point")
+
+    ll = core.loglike_with_log_prior(np.zeros(5), {}, [],
+                                     lambda *a: -np.inf, boom, {})
+    assert ll == -np.inf
+
+
+@pytest.mark.parametrize("bad", [-np.inf, np.nan])
+def test_a_non_finite_log_prior_rejects_the_point(bad):
+    core = load()
+    ll = core.loglike_with_log_prior(np.ones(5), {}, [], _base_minus_three,
+                                     lambda *a: bad, {})
+    assert ll == -np.inf
+
+
+def test_log_prior_sees_a_log_age_not_an_eep_under_mass_eep(monkeypatch):
+    core = load(SAMPLE_COORD="mass_eep")
+    monkeypatch.setattr(core, "logage_from_eep", lambda m, eep, f: 10.0)
+    seen = []
+    core.loglike_with_log_prior(np.array([0.9, 450.0, -1.0, 1e4, 0.0]), {}, [],
+                                _base_minus_three,
+                                lambda *a: seen.append(a[1]) or 0.0, {})
+    assert seen == [10.0]
+
+
+def test_log_prior_can_be_named_in_the_environment():
+    core = load()
+    assert core._resolve_log_prior("os.path:join") is os.path.join
+    for bad in ("os.path", ":join", "os.path:"):
+        with pytest.raises(ValueError):
+            core._resolve_log_prior(bad)
+
+
+def test_log_prior_arguments_survive_the_process_pool():
+    import pickle
+    from astropy.table import MaskedColumn, Table
+    core = load()
+    t = Table({"source_id": [7], "l": [280.5],
+               "FEH": MaskedColumn([0.0], mask=[True])})
+    star = core._row_as_dict(t[0])
+    assert star["source_id"] == 7 and type(star["source_id"]) is int
+    assert star["l"] == 280.5 and np.isnan(star["FEH"])
+    args = ({}, [], core.loglike_phot_theta, _gaussian_distance_prior, star)
+    back = pickle.loads(pickle.dumps(args))
+    assert back[3] is _gaussian_distance_prior
+    assert back[4]["l"] == 280.5 and np.isnan(back[4]["FEH"])
